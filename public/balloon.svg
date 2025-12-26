@@ -1,0 +1,22 @@
+<svg width="60" height="80" viewBox="0 0 60 80" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <filter id="glow">
+    <feGaussianBlur stdDeviation="1.5" result="coloredBlur"/>
+    <feMerge>
+      <feMergeNode in="coloredBlur"/>
+      <feMergeNode in="SourceGraphic"/>
+    </feMerge>
+  </filter>
+  
+  <!-- Envelope -->
+  <path d="M30 0C13.4315 0 0 13.4315 0 30C0 46.5685 13.4315 60 30 60C46.5685 60 60 46.5685 60 30C60 13.4315 46.5685 0 30 0Z" fill="#ff00ff" filter="url(#glow)"/>
+  <path d="M30 0C30 0 42 14 42 30C42 46 30 60 30 60C30 60 18 46 18 30C18 14 30 0 30 0Z" fill="#00ffff" fill-opacity="0.7"/>
+  <path d="M30 0V60" stroke="white" stroke-width="2" stroke-opacity="0.8"/>
+  <path d="M2 30H58" stroke="white" stroke-width="2" stroke-opacity="0.5"/>
+  
+  <!-- Ropes -->
+  <path d="M20 54L24 68" stroke="white" stroke-width="2"/>
+  <path d="M40 54L36 68" stroke="white" stroke-width="2"/>
+  
+  <!-- Basket -->
+  <rect x="22" y="68" width="16" height="12" rx="3" fill="#ffff00" stroke="white" stroke-width="1"/>
+</svg>
