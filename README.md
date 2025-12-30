@@ -11,8 +11,35 @@ Follow these steps to set up the project locally for development or testing.
 ### Prerequisites
 *   Node.js (v18 or higher)
 *   npm, yarn, or pnpm
+*   **Python 3.8+** (for the backend data service)
 
-### Installation
+### Data Accuracy & Sources
+This project visualizes **real-world data** with high accuracy:
+-   **Balloon Positions**: Fetched in real-time from Windborne Systems' public [Treasure API](https://windbornesystems.com). These coords represent actual payloads currently in the stratosphere.
+-   **Globe**: Uses a geodetically accurate 3D globe projection (MapLibre GL).
+-   **Weather**: Live local weather conditions (Wind/Temp) are fetched from [OpenMeteo](https://open-meteo.com/) based on the balloon's precise coordinates.
+
+### Backend Setup (Required)
+
+The data fetching logic is powered by a Python FastAPI service. You must run this service for the map to display data.
+
+1.  **Navigate to backend directory**
+    ```bash
+    cd backend
+    ```
+
+2.  **Install Python Dependencies**
+    ```bash
+    pip install -r requirements.txt
+    ```
+
+3.  **Start the Python Server**
+    ```bash
+    uvicorn main:app --reload
+    ```
+    The server will run at `http://localhost:8000`.
+
+### Frontend Installation
 
 1.  **Clone the Repository**
     ```bash
