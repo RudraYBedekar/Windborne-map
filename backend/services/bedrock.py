@@ -364,7 +364,8 @@ class BedrockChatService:
                     messages=bedrock_messages,
                     system=[{"text": system}],
                     toolConfig={"tools": ai_tools.BEDROCK_TOOLS},
-                    inferenceConfig={"maxTokens": 1024, "temperature": 0.2, "topP": 0.9},
+                    # Haiku 4.5 rejects temperature + topP together — use temperature only
+                    inferenceConfig={"maxTokens": 1024, "temperature": 0.2},
                 )
                 stop = response.get("stopReason")
                 output_msg = response["output"]["message"]
