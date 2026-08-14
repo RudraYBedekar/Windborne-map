@@ -1,73 +1,303 @@
-import os
+"""
+Vicky-AI Mission Operations Copilot — Amazon Bedrock grounded chat service.
+
+Principle: The LLM explains the data. The application provides the truth.
+"""
+from __future__ import annotations
+
 import json
 import logging
-from typing import List, Dict, Any, Optional
-from datetime import datetime
+import time
+from datetime import datetime, timezone
+from typing import Any, Dict, List, Optional
+
+from services.ai_config import get_ai_config
+from services import ai_tools
 
 logger = logging.getLogger("bedrock_service")
+logging.basicConfig(level=logging.INFO)
+
+
+SYSTEM_PROMPT = """You are Vicky-AI, the WindBorne Mission Operations Copilot powered by Amazon Bedrock.
+
+## Grounding policy (mandatory)
+You have NO independent knowledge of the current balloon fleet, live weather, or operational status.
+Any claim about balloon counts, positions, altitudes, speeds, trajectories, telemetry age, fleet averages,
+anomalies, or location-specific weather MUST come from a tool result in THIS request.
+
+Never estimate, assume, invent, or recycle example numbers.
+Never claim NOAA solar-terminator validation, "1000 balloons", or other demo facts unless a tool returned them.
+
+If required data cannot be retrieved, say exactly one of:
+- "I couldn't verify that from the current telemetry."
+- "The WeatherMesh service did not return enough information to answer that reliably."
+- "AI service tools could not complete this request."
+
+Never silently substitute fictional data.
+
+## Balloons / Treasure feed
+Balloon markers may be disabled in the UI because the public Treasure feed is not operationally accurate.
+If get_fleet_status returns dataQuality=unverified_public_feed or balloonsEnabledInUI=false, say so clearly.
+Do not present Treasure index IDs as certified mission truth.
+
+## Weather
+Use get_weather for atmospheric conditions. Respect provider and isFallback fields.
+If isFallback is true, label the source as Open-Meteo fallback — never call it WeatherMesh.
+
+## Locations
+Bare place names (e.g. "fairfax") are LOCATION_SEARCH. Use search_location.
+After resolving, ask whether the user wants weather, balloons nearby, or a globe fly-to —
+do NOT dump unrelated fleet statistics.
+
+## Conceptual knowledge
+You MAY explain general concepts (what pressure means, what a stratospheric balloon is, solar terminator)
+without tools. Operational claims always need tools.
+
+## Style
+Be concise, mission-focused, and honest about uncertainty. Use short markdown.
+When tools return numbers, quote those exact numbers — do not alter them.
+"""
+
 
 class BedrockChatService:
-    def __init__(self):
-        self.enabled = os.getenv("BEDROCK_ENABLED", "true").lower() in ("true", "1", "yes")
-        self.region = os.getenv("AWS_REGION") or os.getenv("AWS_DEFAULT_REGION", "us-east-1")
-        self.model_id = (
-            os.getenv("BEDROCK_AGENT_MODEL") or
-            os.getenv("BEDROCK_LLM_MODEL") or
-            os.getenv("BEDROCK_MODEL_ID") or
-            "anthropic.claude-3-haiku-20240307-v1:0"
-        )
+    def __init__(self, weather_client=None, telemetry_loader=None):
+        self.weather_client = weather_client
+        self.telemetry_loader = telemetry_loader  # async callable -> list[balloon]
         self.client = None
-        self.last_error = None
+        self.last_error: Optional[str] = None
+        self._refresh_config()
         if self.enabled:
             self._init_client()
+
+    def _refresh_config(self):
+        cfg = get_ai_config()
+        self.enabled = cfg["BEDROCK_ENABLED"]
+        self.region = cfg["AWS_REGION"]
+        self.model_id = cfg["AI_MODEL"]
+        self.display_name = cfg["AI_MODEL_DISPLAY_NAME"]
+        self.provider_name = cfg["AI_PROVIDER"]
+        self.balloons_enabled = cfg["BALLOONS_ENABLED"]
 
     def _init_client(self):
         try:
             import boto3
+            import os
             from botocore.config import Config
 
             config = Config(
                 region_name=self.region,
-                retries={"max_attempts": 3, "mode": "standard"},
+                retries={"max_attempts": 2, "mode": "standard"},
                 connect_timeout=5,
-                read_timeout=30
+                read_timeout=45,
             )
-
-            # Check if explicit keys exist in env, else let boto3 use EC2 IAM instance profile / credentials chain
             aws_access_key = os.getenv("AWS_ACCESS_KEY_ID")
             aws_secret_key = os.getenv("AWS_SECRET_ACCESS_KEY")
             aws_session_token = os.getenv("AWS_SESSION_TOKEN")
 
+            kwargs = {"region_name": self.region, "config": config}
             if aws_access_key and aws_secret_key:
-                self.client = boto3.client(
-                    "bedrock-runtime",
-                    region_name=self.region,
-                    aws_access_key_id=aws_access_key,
-                    aws_secret_access_key=aws_secret_key,
-                    aws_session_token=aws_session_token,
-                    config=config
+                kwargs.update(
+                    {
+                        "aws_access_key_id": aws_access_key,
+                        "aws_secret_access_key": aws_secret_key,
+                        "aws_session_token": aws_session_token,
+                    }
                 )
-            else:
-                # Uses default credential chain (e.g., EC2 IAM Role, ~/.aws/credentials, or env)
-                self.client = boto3.client("bedrock-runtime", region_name=self.region, config=config)
-                
-            logger.info(f"Bedrock client initialized for region {self.region} with model {self.model_id}")
+            self.client = boto3.client("bedrock-runtime", **kwargs)
             self.last_error = None
+            logger.info(
+                "[Vicky-AI] Bedrock ready provider=%s model=%s display=%s",
+                self.provider_name,
+                self.model_id,
+                self.display_name,
+            )
         except Exception as e:
-            self.last_error = str(e)
-            logger.warning(f"Could not initialize AWS Bedrock client: {e}. Falling back to local intelligence mode.")
             self.client = None
+            self.last_error = f"{type(e).__name__}: {e}"
+            logger.warning("[Vicky-AI] Bedrock init failed: %s", self.last_error)
 
     def get_status(self) -> Dict[str, Any]:
-        has_aws_keys = bool(os.getenv("AWS_ACCESS_KEY_ID") and os.getenv("AWS_SECRET_ACCESS_KEY"))
+        self._refresh_config()
+        import os
+
+        has_keys = bool(os.getenv("AWS_ACCESS_KEY_ID") and os.getenv("AWS_SECRET_ACCESS_KEY"))
         return {
             "enabled": self.enabled,
             "bedrock_ready": self.client is not None,
-            "region": self.region,
+            "provider": self.provider_name,
             "model_id": self.model_id,
-            "auth_method": "Explicit API Keys" if has_aws_keys else "IAM Role / Default Credential Chain",
+            "model_display_name": self.display_name,
+            "AI_PROVIDER": self.provider_name,
+            "AI_MODEL": self.model_id,
+            "AI_MODEL_DISPLAY_NAME": self.display_name,
+            "region": self.region,
+            "auth_method": "Explicit API Keys" if has_keys else "IAM Role / Default Credential Chain",
             "last_error": self.last_error,
-            "fallback_available": True
+            "balloons_enabled": self.balloons_enabled,
+            "fallback_available": False,  # no inventing local engine
+            "grounded": True,
+        }
+
+    async def _load_balloons(self) -> List[Dict[str, Any]]:
+        if not self.telemetry_loader:
+            return []
+        try:
+            data = await self.telemetry_loader()
+            return data if isinstance(data, list) else []
+        except Exception as e:
+            logger.warning("[Vicky-AI] telemetry_loader failed: %s", type(e).__name__)
+            return []
+
+    async def _execute_tool(self, name: str, tool_input: Dict[str, Any]) -> Dict[str, Any]:
+        t0 = time.time()
+        logger.info("[Vicky-AI] tool=%s params=%s", name, json.dumps(tool_input, default=str)[:300])
+
+        if name == "search_location":
+            out = await ai_tools.search_location(tool_input.get("query", ""))
+        elif name == "get_weather":
+            if not self.weather_client:
+                out = {"ok": False, "error": "WEATHER_CLIENT_MISSING"}
+            else:
+                out = await ai_tools.get_weather(
+                    float(tool_input["latitude"]),
+                    float(tool_input["longitude"]),
+                    self.weather_client,
+                )
+        elif name == "get_fleet_status":
+            balloons = await self._load_balloons()
+            out = ai_tools.compute_fleet_stats(balloons)
+        elif name == "get_balloon":
+            balloons = await self._load_balloons()
+            out = ai_tools.find_balloon(balloons, tool_input.get("balloon_id", ""))
+        else:
+            out = {"ok": False, "error": "UNKNOWN_TOOL", "name": name}
+
+        ms = int((time.time() - t0) * 1000)
+        logger.info(
+            "[Vicky-AI] tool=%s ok=%s latency_ms=%s",
+            name,
+            out.get("ok"),
+            ms,
+        )
+        return out
+
+    def _unavailable_response(self, reason: str) -> Dict[str, Any]:
+        return {
+            "reply": (
+                "⚠️ **AI service unavailable.** "
+                "I can't generate mission intelligence without Amazon Bedrock right now. "
+                "WeatherMesh and dashboard tools may still work independently.\n\n"
+                f"_Reason: {reason}_"
+            ),
+            "provider": self.provider_name,
+            "model": self.model_id,
+            "model_display_name": self.display_name,
+            "is_fallback": False,
+            "ai_unavailable": True,
+            "sources": [],
+            "toolCalls": [],
+            "actions": [],
+            "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            "last_error": self.last_error,
+        }
+
+    async def _location_first_path(self, query: str) -> Optional[Dict[str, Any]]:
+        """Deterministic routing for bare place names — never invent fleet facts."""
+        if not ai_tools.look_like_bare_location(query):
+            return None
+
+        loc = await ai_tools.search_location(query)
+        if not loc.get("ok") or not loc.get("results"):
+            return {
+                "reply": (
+                    f"I couldn't resolve **{query}** to a map location. "
+                    "Try a more specific place name (city + state/country)."
+                ),
+                "provider": self.provider_name,
+                "model": self.model_id,
+                "model_display_name": self.display_name,
+                "is_fallback": False,
+                "sources": [
+                    {
+                        "type": "geocoder",
+                        "provider": "OpenStreetMap Nominatim",
+                        "retrievedAt": loc.get("retrievedAt"),
+                    }
+                ],
+                "toolCalls": [{"name": "search_location", "input": {"query": query}, "result": loc}],
+                "actions": [],
+                "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            }
+
+        top = loc["results"][0]
+        lat, lon = top["latitude"], top["longitude"]
+        actions = [
+            {
+                "type": "FLY_TO_LOCATION",
+                "latitude": lat,
+                "longitude": lon,
+                "name": top.get("name"),
+            }
+        ]
+
+        # Optionally attach weather for stronger UX
+        weather_bit = ""
+        weather_src = None
+        tool_calls = [{"name": "search_location", "input": {"query": query}, "result": loc}]
+        if self.weather_client:
+            wx = await ai_tools.get_weather(lat, lon, self.weather_client)
+            tool_calls.append(
+                {"name": "get_weather", "input": {"latitude": lat, "longitude": lon}, "result": wx}
+            )
+            if wx.get("ok"):
+                cur = wx.get("current") or {}
+                label = wx.get("provider")
+                if wx.get("isFallback"):
+                    label = f"{label} (fallback)"
+                weather_bit = (
+                    f"\n\n**Current conditions** ({label}):\n"
+                    f"- Temp: `{cur.get('temperature')} °C`\n"
+                    f"- Pressure: `{cur.get('pressure')} hPa`\n"
+                    f"- Wind: `{cur.get('windSpeed')} km/h` @ `{cur.get('windDirection')}°`\n"
+                    f"- Precip: `{cur.get('precipitation')} mm/h`"
+                )
+                weather_src = {
+                    "type": "weather",
+                    "provider": wx.get("provider"),
+                    "isFallback": wx.get("isFallback"),
+                    "retrievedAt": wx.get("retrievedAt"),
+                }
+
+        reply = (
+            f"📍 I found **{top.get('name')}** "
+            f"(`{lat:.4f}°, {lon:.4f}°`).\n\n"
+            f"Would you like me to:\n"
+            f"- check WeatherMesh conditions here,\n"
+            f"- move the globe to this location,\n"
+            f"- or look for nearby balloons "
+            f"(note: balloon markers are currently hidden because the public Treasure feed is not operationally accurate)?"
+            f"{weather_bit}"
+        )
+        sources = [
+            {
+                "type": "geocoder",
+                "provider": "OpenStreetMap Nominatim",
+                "retrievedAt": loc.get("retrievedAt"),
+            }
+        ]
+        if weather_src:
+            sources.append(weather_src)
+
+        return {
+            "reply": reply,
+            "provider": self.provider_name,
+            "model": "deterministic-router",
+            "model_display_name": self.display_name,
+            "is_fallback": False,
+            "sources": sources,
+            "toolCalls": tool_calls,
+            "actions": actions,
+            "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         }
 
     async def generate_response(
@@ -75,326 +305,170 @@ class BedrockChatService:
         messages: List[Dict[str, str]],
         fleet_context: Optional[Dict[str, Any]] = None,
         selected_balloon: Optional[Dict[str, Any]] = None,
-        weather_context: Optional[Dict[str, Any]] = None
+        weather_context: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
-        """
-        Generate response from Vicky-AI using Amazon Bedrock (Claude / Nova / Nemotron)
-        or intelligent contextual fallback.
-        """
-        system_prompt = self._build_system_prompt(fleet_context, selected_balloon, weather_context)
+        self._refresh_config()
         user_message = messages[-1].get("content", "") if messages else ""
+        t0 = time.time()
+        logger.info("[Vicky-AI] query=%s", user_message[:200])
 
-        # Re-initialize client if not yet created (e.g. role was attached after server start)
+        # 1) Deterministic location routing (fixes "fairfax" → random fleet rant)
+        routed = await self._location_first_path(user_message)
+        if routed:
+            logger.info(
+                "[Vicky-AI] intent=LOCATION_SEARCH latency_ms=%s",
+                int((time.time() - t0) * 1000),
+            )
+            return routed
+
+        # 2) Bedrock required for LLM answers — no inventing local engine
         if not self.client and self.enabled:
             self._init_client()
+        if not self.client:
+            return self._unavailable_response(self.last_error or "Bedrock client not initialized")
 
-        # 1. Attempt NVIDIA NIM / OpenAI-compatible endpoint if configured (e.g. self-hosted Nemotron on EC2)
-        nim_url = os.getenv("NVIDIA_NIM_URL")
-        if nim_url:
-            try:
-                import httpx
-                headers = {"Content-Type": "application/json"}
-                nim_api_key = os.getenv("NVIDIA_API_KEY")
-                if nim_api_key:
-                    headers["Authorization"] = f"Bearer {nim_api_key}"
-
-                nim_messages = [{"role": "system", "content": system_prompt}]
-                for m in messages:
-                    nim_messages.append({"role": m.get("role", "user"), "content": m.get("content", "")})
-
-                async with httpx.AsyncClient(timeout=30.0) as http_client:
-                    res = await http_client.post(
-                        f"{nim_url.rstrip('/')}/v1/chat/completions",
-                        headers=headers,
-                        json={
-                            "model": self.model_id or "nvidia/nemotron-nano-3-30b",
-                            "messages": nim_messages,
-                            "temperature": 0.4,
-                            "max_tokens": 1024
-                        }
-                    )
-                    if res.status_code == 200:
-                        data = res.json()
-                        reply = data["choices"][0]["message"]["content"]
-                        return {
-                            "reply": reply,
-                            "provider": f"NVIDIA Nemotron ({self.model_id})",
-                            "model": self.model_id,
-                            "is_fallback": False,
-                            "timestamp": datetime.utcnow().isoformat() + "Z"
-                        }
-            except Exception as e:
-                logger.warning(f"NVIDIA NIM call failed: {e}")
-
-        # 2. Attempt Bedrock invocation
-        if self.client:
-            models_to_try = [
-                self.model_id,
-                "anthropic.claude-3-haiku-20240307-v1:0",
-                "us.anthropic.claude-haiku-4-5-20251001-v1:0",
-                "us.amazon.nova-2-lite-v1:0",
-                "amazon.nova-micro-v1:0",
-                "anthropic.claude-3-5-sonnet-20240620-v1:0"
-            ]
-            # De-duplicate while preserving order
-            seen = set()
-            ordered_models = [m for m in models_to_try if m and not (m in seen or seen.add(m))]
-
-            bedrock_messages = []
-            for m in messages:
-                role = "user" if m.get("role") == "user" else "assistant"
-                bedrock_messages.append({
-                    "role": role,
-                    "content": [{"text": m.get("content", "")}]
-                })
-
-            for candidate_model in ordered_models:
-                try:
-                    # Try Converse API first
-                    response = self.client.converse(
-                        modelId=candidate_model,
-                        messages=bedrock_messages,
-                        system=[{"text": system_prompt}],
-                        inferenceConfig={
-                            "maxTokens": 1024,
-                            "temperature": 0.4,
-                            "topP": 0.9
-                        }
-                    )
-
-                    output_text = response["output"]["message"]["content"][0]["text"]
-                    model_display = candidate_model.split(':')[-2] if ':' in candidate_model else candidate_model
-                    self.last_error = None
-                    return {
-                        "reply": output_text,
-                        "provider": f"Amazon Bedrock ({model_display})",
-                        "model": candidate_model,
-                        "is_fallback": False,
-                        "timestamp": datetime.utcnow().isoformat() + "Z"
-                    }
-                except Exception as e:
-                    self.last_error = f"{candidate_model}: {str(e)}"
-                    logger.error(f"Bedrock invocation failed with {candidate_model}: {e}")
-
-                    # If converse fails, try direct invoke_model (for pure invokeModel permission policies)
-                    try:
-                        if "claude" in candidate_model.lower():
-                            body = json.dumps({
-                                "anthropic_version": "bedrock-2023-05-31",
-                                "max_tokens": 1024,
-                                "system": system_prompt,
-                                "messages": bedrock_messages
-                            })
-                            invoke_res = self.client.invoke_model(
-                                modelId=candidate_model,
-                                body=body,
-                                contentType="application/json",
-                                accept="application/json"
-                            )
-                            res_body = json.loads(invoke_res["body"].read())
-                            output_text = res_body.get("content", [{}])[0].get("text", "")
-                            if output_text:
-                                self.last_error = None
-                                return {
-                                    "reply": output_text,
-                                    "provider": f"Amazon Bedrock ({candidate_model})",
-                                    "model": candidate_model,
-                                    "is_fallback": False,
-                                    "timestamp": datetime.utcnow().isoformat() + "Z"
-                                }
-                    except Exception as invoke_err:
-                        logger.error(f"Bedrock invoke_model also failed for {candidate_model}: {invoke_err}")
-
-        # Fallback to rich contextual local engine
-        reply = self._generate_local_reply(user_message, fleet_context, selected_balloon, weather_context)
-        return {
-            "reply": reply,
-            "provider": f"Vicky-AI (Local Engine)",
-            "model": self.model_id or "local-fallback",
-            "is_fallback": True,
-            "last_error": self.last_error,
-            "timestamp": datetime.utcnow().isoformat() + "Z"
-        }
-
-
-
-    def _build_system_prompt(
-        self,
-        fleet_context: Optional[Dict[str, Any]],
-        selected_balloon: Optional[Dict[str, Any]],
-        weather_context: Optional[Dict[str, Any]]
-    ) -> str:
-        prompt = (
-            "You are Vicky-AI, the Lead AI Flight Operations Director and Stratospheric Meteorologist for the "
-            "WindBorne Systems balloon tracking operations platform.\n"
-            "You are precise, mission-focused, helpful, and highly knowledgeable about atmospheric physics, "
-            "high-altitude soundings, WindBorne WeatherMesh AI models, and real-time balloon constellation dynamics.\n"
-            "Keep answers concise, clear, and formatted nicely in GitHub Markdown with emojis, bullets, and stats where suitable.\n\n"
-            "--- CURRENT MISSION CONTEXT ---\n"
-        )
-
-        if fleet_context:
-            total = fleet_context.get("total_balloons", 0)
-            high_alt = fleet_context.get("high_altitude_count", 0)
-            avg_alt = fleet_context.get("avg_altitude_m", 0)
-            highest = fleet_context.get("highest_balloon", {})
-            fastest = fleet_context.get("fastest_balloon", {})
-            prompt += (
-                f"- Total Active Constellation Balloons: {total}\n"
-                f"- High-Altitude Balloons (>=18,000m): {high_alt}\n"
-                f"- Fleet Average Altitude: {avg_alt:.0f} meters\n"
-            )
-            if highest:
-                prompt += f"- Highest Balloon: {highest.get('id')} at {highest.get('alt', 0):.0f}m ({highest.get('alt_ft', 0):.0f} ft)\n"
-            if fastest:
-                prompt += f"- Fastest Balloon: {fastest.get('id')} at {fastest.get('speed_kmh', 0):.1f} km/h\n"
-
+        # Inject light session context (facts only if provided by app — still prefer tools)
+        context_bits = []
         if selected_balloon:
-            prompt += (
-                f"\n--- CURRENTLY SELECTED BALLOON ---\n"
-                f"- Balloon ID: {selected_balloon.get('id')}\n"
-                f"- Coordinates: Lat {selected_balloon.get('lat')}, Lon {selected_balloon.get('lon')}\n"
-                f"- Altitude: {selected_balloon.get('alt', 0):.0f}m ({selected_balloon.get('alt_ft', 0):.0f} ft)\n"
-                f"- Speed: {selected_balloon.get('speed_kmh', 0):.1f} km/h\n"
-                f"- Heading: {selected_balloon.get('heading', 'N/A')}\n"
-                f"- Flight Duration: {selected_balloon.get('duration_hours', 'N/A')} hours\n"
+            context_bits.append(f"UI selected balloon id hint: {selected_balloon.get('id')}")
+        if weather_context and weather_context.get("provider"):
+            context_bits.append(
+                f"UI last weather provider hint: {weather_context.get('provider')} "
+                "(verify with get_weather before citing numbers)"
+            )
+        if not self.balloons_enabled:
+            context_bits.append(
+                "BALLOONS_ENABLED=false — do not imply markers are shown on the globe."
             )
 
-        if weather_context:
-            prompt += (
-                f"\n--- LOCAL WEATHERMESH DATA ---\n"
-                f"- Provider: {weather_context.get('provider', 'WindBorne WeatherMesh')}\n"
-                f"- Temperature: {weather_context.get('temperature', 'N/A')} °C\n"
-                f"- Pressure MSL: {weather_context.get('pressure', 'N/A')} hPa\n"
-                f"- Wind: {weather_context.get('windSpeed', 'N/A')} km/h at {weather_context.get('windDirection', 'N/A')}°\n"
-                f"- Precipitation: {weather_context.get('precipitation', 0)} mm/h\n"
+        system = SYSTEM_PROMPT
+        if context_bits:
+            system += "\n\n## Session hints\n- " + "\n- ".join(context_bits)
+
+        bedrock_messages = []
+        for m in messages[-12:]:
+            role = "user" if m.get("role") == "user" else "assistant"
+            bedrock_messages.append(
+                {"role": role, "content": [{"text": m.get("content", "")}]}
             )
 
-        return prompt
+        tool_trace: List[Dict[str, Any]] = []
+        sources: List[Dict[str, Any]] = []
+        actions: List[Dict[str, Any]] = []
 
-    def _generate_local_reply(
-        self,
-        query: str,
-        fleet_context: Optional[Dict[str, Any]],
-        selected_balloon: Optional[Dict[str, Any]],
-        weather_context: Optional[Dict[str, Any]]
-    ) -> str:
-        q = query.lower()
-
-        # 1. Greetings
-        if any(g in q for g in ["hello", "hi", "hey", "who are you", "what can you do"]):
-            return (
-                "👋 **Greetings! I am Vicky-AI**, your Lead Flight Operations & Meteorological Co-Pilot for the WindBorne balloon constellation.\n\n"
-                "I monitor real-time stratospheric soundings, track fleet trajectories, analyze WindBorne WeatherMesh forecasts, and evaluate atmospheric conditions.\n\n"
-                "Here are some quick inquiries you can ask me:\n"
-                "- 📊 *\"Summarize the current fleet status\"*\n"
-                "- 🚀 *\"Which balloon is flying at the highest altitude?\"*\n"
-                "- 💨 *\"What are the fastest balloons in the air?\"*\n"
-                "- 🌤️ *\"Explain the WeatherMesh atmospheric forecast\"*\n"
-                "- 🎈 *\"Analyze the currently selected balloon\"*"
-            )
-
-        # 2. Selected Balloon Query
-        if any(w in q for w in ["selected", "this balloon", "current balloon", "details", "selected balloon"]) and selected_balloon:
-            b_id = selected_balloon.get("id", "Unknown")
-            alt_m = selected_balloon.get("alt", 0)
-            alt_ft = selected_balloon.get("alt_ft", alt_m * 3.28084)
-            speed = selected_balloon.get("speed_kmh", 0)
-            lat = selected_balloon.get("lat", 0)
-            lon = selected_balloon.get("lon", 0)
-            heading = selected_balloon.get("heading", "N/A")
-            return (
-                f"🎈 **Telemetry Analysis for Balloon `{b_id}`**\n\n"
-                f"- **Altitude:** `{alt_m:,.0f} m` ({alt_ft:,.0f} ft) — {'✈️ Stratospheric (FL' + str(int(alt_ft/100)) + ')' if alt_m >= 12000 else 'Tropospheric'}\n"
-                f"- **Ground Speed:** `{speed:.1f} km/h` ({speed * 0.539957:.1f} kts)\n"
-                f"- **Heading / Bearing:** `{heading}`\n"
-                f"- **Coordinates:** `{lat:.4f}°, {lon:.4f}°`\n"
-                f"- **Telemetry Freshness:** Live within 24h constellation track\n\n"
-                f"💡 *Tip: You can export this balloon's full 24h trajectory as **GPX** or **GeoJSON** in the Balloon Details panel.*"
-            )
-
-        # 3. Highest Balloon
-        if any(w in q for w in ["highest", "max altitude", "top balloon", "ceiling"]):
-            if fleet_context and "highest_balloon" in fleet_context:
-                h = fleet_context["highest_balloon"]
-                return (
-                    f"🏔️ **Highest Balloon in the Constellation**\n\n"
-                    f"The highest tracked balloon is **`{h.get('id')}`** cruising at an altitude of **`{h.get('alt', 0):,.0f} meters`** ({h.get('alt_ft', 0):,.0f} ft).\n\n"
-                    f"- **Coordinates:** `{h.get('lat', 0):.3f}°, {h.get('lon', 0):.3f}°`\n"
-                    f"- **Ground Speed:** `{h.get('speed_kmh', 0):.1f} km/h`\n"
-                    f"- **Status:** Stratospheric sounding flight profile"
+        try:
+            # Tool loop (max 3 rounds)
+            for _round in range(3):
+                response = self.client.converse(
+                    modelId=self.model_id,
+                    messages=bedrock_messages,
+                    system=[{"text": system}],
+                    toolConfig={"tools": ai_tools.BEDROCK_TOOLS},
+                    inferenceConfig={"maxTokens": 1024, "temperature": 0.2, "topP": 0.9},
                 )
-            return "📡 Scanning constellation telemetry... Please ensure live fleet data is synced."
+                stop = response.get("stopReason")
+                output_msg = response["output"]["message"]
+                bedrock_messages.append(output_msg)
 
-        # 4. Fastest Balloon
-        if any(w in q for w in ["fastest", "top speed", "max speed", "wind speed"]):
-            if fleet_context and "fastest_balloon" in fleet_context:
-                f = fleet_context["fastest_balloon"]
-                return (
-                    f"⚡ **Fastest Balloon in the Constellation**\n\n"
-                    f"The fastest moving balloon is **`{f.get('id')}`** traveling at **`{f.get('speed_kmh', 0):.1f} km/h`** ({f.get('speed_kmh', 0) * 0.539957:.1f} knots).\n\n"
-                    f"- **Altitude:** `{f.get('alt', 0):,.0f} m` ({f.get('alt_ft', 0):,.0f} ft)\n"
-                    f"- **Coordinates:** `{f.get('lat', 0):.3f}°, {f.get('lon', 0):.3f}°`\n"
-                    f"- **Atmospheric Factor:** Propelled by stratospheric jetstream corridors."
-                )
+                if stop != "tool_use":
+                    texts = [
+                        c.get("text", "")
+                        for c in output_msg.get("content", [])
+                        if "text" in c
+                    ]
+                    reply = "\n".join(t for t in texts if t).strip() or (
+                        "I couldn't form a grounded answer from the available tools."
+                    )
+                    logger.info(
+                        "[Vicky-AI] model=%s stop=%s tools=%s latency_ms=%s",
+                        self.model_id,
+                        stop,
+                        len(tool_trace),
+                        int((time.time() - t0) * 1000),
+                    )
+                    return {
+                        "reply": reply,
+                        "provider": self.provider_name,
+                        "model": self.model_id,
+                        "model_display_name": self.display_name,
+                        "is_fallback": False,
+                        "sources": sources,
+                        "toolCalls": tool_trace,
+                        "actions": actions,
+                        "timestamp": datetime.now(timezone.utc).isoformat().replace(
+                            "+00:00", "Z"
+                        ),
+                    }
 
-        # 5. Fleet Summary
-        if any(w in q for w in ["fleet", "summary", "overview", "constellation", "how many", "all balloons"]):
-            total = fleet_context.get("total_balloons", 0) if fleet_context else 0
-            high_alt = fleet_context.get("high_altitude_count", 0) if fleet_context else 0
-            avg_alt = fleet_context.get("avg_altitude_m", 0) if fleet_context else 0
-            return (
-                f"🌐 **WindBorne Constellation Fleet Summary**\n\n"
-                f"- **Total Active Balloons:** `{total}`\n"
-                f"- **High-Altitude Craft ($\ge$18,000m):** `{high_alt}`\n"
-                f"- **Average Fleet Altitude:** `{avg_alt:,.0f} m` ({avg_alt * 3.28084:,.0f} ft)\n"
-                f"- **Data Ingestion:** 24-hour continuous rolling telemetry (`00.json`–`23.json`)\n"
-                f"- **Atmospheric Model:** WindBorne WeatherMesh AI Weather Model\n\n"
-                f"You can use the **Timeline Scrubber** at the bottom to scrub 24 hours back in time, or select any balloon on the 3D globe for micro-diagnostics."
-            )
+                # Execute tool uses
+                tool_results_content = []
+                for block in output_msg.get("content", []):
+                    if "toolUse" not in block:
+                        continue
+                    tu = block["toolUse"]
+                    name = tu["name"]
+                    tool_input = tu.get("input") or {}
+                    tool_use_id = tu["toolUseId"]
+                    result = await self._execute_tool(name, tool_input)
+                    tool_trace.append(
+                        {"name": name, "input": tool_input, "result": result}
+                    )
 
-        # 6. Weather & WeatherMesh
-        if any(w in q for w in ["weather", "forecast", "weathermesh", "temperature", "pressure", "radar"]):
-            if weather_context:
-                temp = weather_context.get("temperature", "N/A")
-                pressure = weather_context.get("pressure", "N/A")
-                wind_spd = weather_context.get("windSpeed", "N/A")
-                wind_dir = weather_context.get("windDirection", "N/A")
-                provider = weather_context.get("provider", "WindBorne WeatherMesh")
-                precip = weather_context.get("precipitation", 0)
-                temp_f_str = f"({float(temp)*9/5+32:.1f}°F)" if isinstance(temp, (int, float)) else ""
-                return (
-                    f"🌤️ **Active Atmospheric Weather Assessment**\n\n"
-                    f"- **Provider:** `{provider}`\n"
-                    f"- **Temperature:** `{temp} °C` {temp_f_str}\n"
-                    f"- **Sea-Level Pressure:** `{pressure} hPa`\n"
-                    f"- **Surface/Flight Wind:** `{wind_spd} km/h` heading `{wind_dir}°`\n"
-                    f"- **Precipitation Rate:** `{precip} mm/h`\n\n"
-                    f"💨 *WeatherMesh AI leverages stratospheric planetary sounding data to deliver higher-precision atmospheric models than conventional GFS grids.*"
-                )
-            return (
-                "🌤️ **WindBorne WeatherMesh Engine**\n\n"
-                "WindBorne WeatherMesh is an advanced AI-powered numerical weather prediction model trained on dense stratospheric balloon soundings.\n\n"
-                "Click on any city via the search bar or select an active balloon marker to pull live point forecasts."
-            )
+                    if name == "search_location" and result.get("ok") and result.get("results"):
+                        top = result["results"][0]
+                        actions.append(
+                            {
+                                "type": "FLY_TO_LOCATION",
+                                "latitude": top["latitude"],
+                                "longitude": top["longitude"],
+                                "name": top.get("name"),
+                            }
+                        )
+                        sources.append(
+                            {
+                                "type": "geocoder",
+                                "provider": result.get("provider"),
+                                "retrievedAt": result.get("retrievedAt"),
+                            }
+                        )
+                    elif name == "get_weather" and result.get("ok"):
+                        sources.append(
+                            {
+                                "type": "weather",
+                                "provider": result.get("provider"),
+                                "isFallback": result.get("isFallback"),
+                                "retrievedAt": result.get("retrievedAt"),
+                            }
+                        )
+                    elif name in ("get_fleet_status", "get_balloon") and result.get("ok"):
+                        sources.append(
+                            {
+                                "type": "fleet_telemetry",
+                                "provider": result.get("provider", "WindBorne Treasure"),
+                                "retrievedAt": result.get("retrievedAt"),
+                            }
+                        )
+                    elif name == "get_balloon" and result.get("ok"):
+                        actions.append(
+                            {
+                                "type": "SELECT_BALLOON",
+                                "balloonId": result["balloon"]["id"],
+                            }
+                        )
 
+                    tool_results_content.append(
+                        {
+                            "toolResult": {
+                                "toolUseId": tool_use_id,
+                                "content": [{"json": result}],
+                            }
+                        }
+                    )
 
-        # 7. Bedrock / AWS Deployment
-        if any(w in q for w in ["bedrock", "aws", "ec2", "deploy", "setup"]):
-            return (
-                "☁️ **Amazon Bedrock & EC2 Deployment**\n\n"
-                "I can run directly on **Amazon Bedrock** (Anthropic Claude 3.5 Sonnet, Claude 3 Haiku, or Amazon Nova) deployed on AWS EC2!\n\n"
-                "Check out the newly generated **`AWS_BEDROCK_EC2_GUIDE.md`** in the project root for complete setup instructions:\n"
-                "1. Enable Bedrock Foundation Models in AWS Console.\n"
-                "2. Attach IAM Role with Bedrock invoke policies to your EC2 instance.\n"
-                "3. Launch FastAPI backend + Next.js frontend with Nginx & PM2."
-            )
+                bedrock_messages.append({"role": "user", "content": tool_results_content})
 
-        # Default Helpful Response
-        return (
-            f"🤖 **Vicky-AI Mission Intelligence Received:** *\"{query}\"*\n\n"
-            f"Based on our active 3D constellation monitoring:\n"
-            f"- We have `{fleet_context.get('total_balloons', 0) if fleet_context else 'active'}` balloons transmitting real-time telemetry.\n"
-            f"- All flight trajectories are validated against NOAA solar terminator calculations.\n\n"
-            f"Feel free to ask me to analyze any specific balloon, examine WeatherMesh forecasts, or explore flight routes!"
-        )
+            return self._unavailable_response("Tool loop exceeded without a final answer")
+        except Exception as e:
+            self.last_error = f"{type(e).__name__}: {e}"
+            logger.error("[Vicky-AI] Bedrock converse failed: %s", self.last_error)
+            return self._unavailable_response(self.last_error)

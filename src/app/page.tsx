@@ -13,6 +13,9 @@ import { fetchWeather, WeatherData } from '@/services/weather';
 import { ShieldAlert } from 'lucide-react';
 import { Toaster, toast } from 'react-hot-toast';
 
+/** Treasure public feed is not operationally accurate — hide balloon markers/list. */
+const SHOW_BALLOONS = process.env.NEXT_PUBLIC_SHOW_BALLOONS === 'true';
+
 export default function Home() {
   const [balloons, setBalloons] = useState<Balloon[]>([]);
   const [loading, setLoading] = useState(true);
@@ -62,49 +65,39 @@ export default function Home() {
 
   const prevHealthRef = useRef<BackendHealthStatus | null>(null);
 
-  // Load telemetry data & check backend health
+  // Load health (+ optional balloons only if explicitly enabled)
   const loadData = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
-      const [data, health] = await Promise.all([
-        fetchWindBorneData(),
-        checkBackendHealth()
-      ]);
-
+      const health = await checkBackendHealth();
       const prevHealth = prevHealthRef.current;
       prevHealthRef.current = health;
-
       setHealthStatus(health);
 
-      // Handle backend status toasts
       if (health.directMode) {
-        toast.error("FastAPI Backend Offline • Direct Telemetry Mode Active", {
-          id: "backend-health",
-          duration: 5000,
-        });
+        toast.error('FastAPI Backend Offline', { id: 'backend-health', duration: 5000 });
       } else if (prevHealth && prevHealth.directMode) {
-        toast.success("FastAPI Backend Connected", {
-          id: "backend-health",
-          duration: 3000,
-        });
+        toast.success('FastAPI Backend Connected', { id: 'backend-health', duration: 3000 });
       }
 
-      if (data.length === 0) {
-        setError("No telemetry data returned.");
-        toast.error("No telemetry data returned.", { id: "data-status" });
+      if (SHOW_BALLOONS) {
+        const data = await fetchWindBorneData();
+        if (data.length === 0) {
+          setError('No telemetry data returned.');
+        } else {
+          setBalloons(data);
+          setLastUpdated(new Date());
+        }
       } else {
-        setBalloons(data);
+        setBalloons([]);
         setLastUpdated(new Date());
-        toast.success(`Loaded ${data.length} active weather balloons`, {
-          id: "data-status",
-          duration: 2500,
-        });
+        setError(null);
       }
     } catch (err) {
       console.error(err);
-      setError("Failed to load balloon telemetry.");
-      toast.error("Failed to load balloon telemetry.", { id: "data-status" });
+      setError('Failed to load backend status.');
+      toast.error('Failed to load backend status.', { id: 'data-status' });
     } finally {
       setLoading(false);
     }
@@ -156,9 +149,10 @@ export default function Home() {
     <main className="flex flex-col h-screen w-screen overflow-hidden bg-slate-950 text-slate-100 selection:bg-cyan-500/30 font-sans">
       {/* Top Professional Ops Navbar */}
       <Navbar
-        balloons={balloons}
-        selectedId={selectedId}
+        balloons={SHOW_BALLOONS ? balloons : []}
+        selectedId={SHOW_BALLOONS ? selectedId : null}
         onSelectBalloon={(id) => {
+          if (!SHOW_BALLOONS) return;
           setSelectedId(id);
           setSelectedLocation(null);
           setAutoRotate(false);
@@ -186,10 +180,8 @@ export default function Home() {
 
       {/* Main Content Area */}
       <div className="flex-1 relative flex h-[calc(100vh-3.5rem)] w-full overflow-hidden">
-        {/* Real Weather Atmospheric Particle Overlay */}
         <WeatherEffects weather={currentWeather} />
 
-        {/* Selected City Live Weather Intelligence Panel */}
         {selectedLocation && (
           <CityWeatherPanel
             cityName={selectedLocation.name}
@@ -199,8 +191,7 @@ export default function Home() {
           />
         )}
 
-        {/* Selected Balloon Intelligence Detail Panel */}
-        {selectedBalloon && !selectedLocation && (
+        {SHOW_BALLOONS && selectedBalloon && !selectedLocation && (
           <BalloonDetailPanel
             balloon={selectedBalloon}
             onClose={() => {
@@ -215,34 +206,53 @@ export default function Home() {
           />
         )}
 
-        {/* Vicky-AI Amazon Bedrock Co-Pilot Chat Drawer */}
         <VickyChat
-          balloons={balloons}
-          selectedBalloon={selectedBalloon}
+          balloons={SHOW_BALLOONS ? balloons : []}
+          selectedBalloon={SHOW_BALLOONS ? selectedBalloon : null}
           weather={currentWeather}
           isOpen={isChatOpen}
           onToggle={() => setIsChatOpen((prev) => !prev)}
+          onAction={(action) => {
+            if (!action || typeof action !== 'object') return;
+            if (action.type === 'FLY_TO_LOCATION' && action.latitude != null && action.longitude != null) {
+              setSelectedLocation({
+                lat: Number(action.latitude),
+                lon: Number(action.longitude),
+                name: action.name || `Location (${Number(action.latitude).toFixed(2)}°, ${Number(action.longitude).toFixed(2)}°)`,
+              });
+              setSelectedId(null);
+              setIsTrackingCamera(false);
+              setAutoRotate(false);
+            }
+            if (SHOW_BALLOONS && action.type === 'SELECT_BALLOON' && action.balloonId) {
+              setSelectedId(String(action.balloonId));
+              setSelectedLocation(null);
+              setIsTrackingCamera(true);
+            }
+          }}
         />
 
-        {/* Direct Telemetry Fallback Warning Notification */}
         {healthStatus?.directMode && (
           <div className="absolute top-3 left-1/2 -translate-x-1/2 z-20 bg-amber-950/90 border border-amber-700/80 text-amber-200 px-3.5 py-1.5 rounded-lg shadow-xl text-xs font-mono flex items-center gap-2 backdrop-blur-md">
             <ShieldAlert className="w-4 h-4 text-amber-400 shrink-0 animate-pulse" />
-            <span>FastAPI Backend Offline • Direct Telemetry Mode Active</span>
+            <span>FastAPI Backend Offline</span>
           </div>
         )}
 
+        {!SHOW_BALLOONS && (
+          <div className="absolute top-3 left-1/2 -translate-x-1/2 z-20 bg-slate-950/90 border border-slate-700 text-slate-300 px-3.5 py-1.5 rounded-lg shadow-xl text-xs font-mono backdrop-blur-md">
+            Balloon markers hidden — Treasure feed not operationally accurate · WeatherMesh + Vicky-AI available
+          </div>
+        )}
 
-        {/* Tracking indicator */}
-        {isTrackingCamera && selectedBalloon && (
+        {SHOW_BALLOONS && isTrackingCamera && selectedBalloon && (
           <div className="absolute top-3 left-1/2 -translate-x-1/2 z-20 bg-cyan-950/90 border border-cyan-700/80 text-cyan-200 px-3.5 py-1.5 rounded-lg shadow-xl text-xs font-mono flex items-center gap-2 backdrop-blur-md">
             <span className="w-2 h-2 rounded-full bg-cyan-400 animate-pulse" />
             <span>Tracking {selectedBalloon.id} — drag map to unlock</span>
           </div>
         )}
 
-        {/* 24-Hour Telemetry Timeline Scrubber (client-only clock avoids SSR hydration mismatch) */}
-        {timelineReady && (
+        {SHOW_BALLOONS && timelineReady && (
           <TimelineControls
             minTime={minTime}
             maxTime={maxTime}
@@ -262,12 +272,12 @@ export default function Home() {
           />
         )}
 
-        {/* Primary 3D Geospatial Map Area */}
         <div className="flex-1 h-full w-full relative">
           <MapComponent
-            balloons={balloons}
-            selectedId={selectedId}
+            balloons={SHOW_BALLOONS ? balloons : []}
+            selectedId={SHOW_BALLOONS ? selectedId : null}
             onSelectBalloon={(id) => {
+              if (!SHOW_BALLOONS) return;
               setSelectedId(id);
               setSelectedLocation(null);
               if (id) {
@@ -284,10 +294,12 @@ export default function Home() {
               setIsTrackingCamera(false);
             }}
             autoRotate={autoRotate}
-            trackSelected={isTrackingCamera}
+            trackSelected={SHOW_BALLOONS && isTrackingCamera}
             onStopTracking={() => setIsTrackingCamera(false)}
             scrubTime={
-              timelineReady && scrubTime < maxTime - 60000 ? scrubTime : undefined
+              SHOW_BALLOONS && timelineReady && scrubTime < maxTime - 60000
+                ? scrubTime
+                : undefined
             }
           />
         </div>

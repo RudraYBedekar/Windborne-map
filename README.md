@@ -254,8 +254,8 @@ windbrone/
 
 1. Open a terminal in the `backend/` directory:
    ```powershell
-   cd backend
-   ```
+    cd backend
+    ```
 
 2. Create and activate a Python virtual environment:
    ```powershell
@@ -265,8 +265,8 @@ windbrone/
 
 3. Install dependencies (including `boto3` for Amazon Bedrock):
    ```powershell
-   pip install -r requirements.txt
-   ```
+    pip install -r requirements.txt
+    ```
 
 4. Configure your `.env` file:
    ```powershell
@@ -296,13 +296,13 @@ windbrone/
 
 1. In the project root directory, install npm dependencies:
    ```powershell
-   npm install
-   ```
+    npm install
+    ```
 
 2. Start the Next.js development server:
    ```powershell
-   npm run dev
-   ```
+    npm run dev
+    ```
 
 3. Open your browser and navigate to:
    ```text
