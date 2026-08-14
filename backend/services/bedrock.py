@@ -14,9 +14,10 @@ class BedrockChatService:
             os.getenv("BEDROCK_AGENT_MODEL") or
             os.getenv("BEDROCK_LLM_MODEL") or
             os.getenv("BEDROCK_MODEL_ID") or
-            "us.anthropic.claude-haiku-4-5-20251001-v1:0"
+            "anthropic.claude-3-haiku-20240307-v1:0"
         )
         self.client = None
+        self.last_error = None
         if self.enabled:
             self._init_client()
 
@@ -51,7 +52,9 @@ class BedrockChatService:
                 self.client = boto3.client("bedrock-runtime", region_name=self.region, config=config)
                 
             logger.info(f"Bedrock client initialized for region {self.region} with model {self.model_id}")
+            self.last_error = None
         except Exception as e:
+            self.last_error = str(e)
             logger.warning(f"Could not initialize AWS Bedrock client: {e}. Falling back to local intelligence mode.")
             self.client = None
 
@@ -63,9 +66,9 @@ class BedrockChatService:
             "region": self.region,
             "model_id": self.model_id,
             "auth_method": "Explicit API Keys" if has_aws_keys else "IAM Role / Default Credential Chain",
+            "last_error": self.last_error,
             "fallback_available": True
         }
-
 
     async def generate_response(
         self,
@@ -75,11 +78,15 @@ class BedrockChatService:
         weather_context: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
         """
-        Generate response from Vicky-AI using Amazon Bedrock (Nemotron / Claude / Nova)
+        Generate response from Vicky-AI using Amazon Bedrock (Claude / Nova / Nemotron)
         or intelligent contextual fallback.
         """
         system_prompt = self._build_system_prompt(fleet_context, selected_balloon, weather_context)
         user_message = messages[-1].get("content", "") if messages else ""
+
+        # Re-initialize client if not yet created (e.g. role was attached after server start)
+        if not self.client and self.enabled:
+            self._init_client()
 
         # 1. Attempt NVIDIA NIM / OpenAI-compatible endpoint if configured (e.g. self-hosted Nemotron on EC2)
         nim_url = os.getenv("NVIDIA_NIM_URL")
@@ -121,48 +128,94 @@ class BedrockChatService:
 
         # 2. Attempt Bedrock invocation
         if self.client:
-            try:
-                # Use Converse API for modern multi-turn & multi-model support
-                bedrock_messages = []
-                for m in messages:
-                    role = "user" if m.get("role") == "user" else "assistant"
-                    bedrock_messages.append({
-                        "role": role,
-                        "content": [{"text": m.get("content", "")}]
-                    })
+            models_to_try = [
+                self.model_id,
+                "anthropic.claude-3-haiku-20240307-v1:0",
+                "us.anthropic.claude-haiku-4-5-20251001-v1:0",
+                "us.amazon.nova-2-lite-v1:0",
+                "amazon.nova-micro-v1:0",
+                "anthropic.claude-3-5-sonnet-20240620-v1:0"
+            ]
+            # De-duplicate while preserving order
+            seen = set()
+            ordered_models = [m for m in models_to_try if m and not (m in seen or seen.add(m))]
 
-                response = self.client.converse(
-                    modelId=self.model_id,
-                    messages=bedrock_messages,
-                    system=[{"text": system_prompt}],
-                    inferenceConfig={
-                        "maxTokens": 1024,
-                        "temperature": 0.4,
-                        "topP": 0.9
+            bedrock_messages = []
+            for m in messages:
+                role = "user" if m.get("role") == "user" else "assistant"
+                bedrock_messages.append({
+                    "role": role,
+                    "content": [{"text": m.get("content", "")}]
+                })
+
+            for candidate_model in ordered_models:
+                try:
+                    # Try Converse API first
+                    response = self.client.converse(
+                        modelId=candidate_model,
+                        messages=bedrock_messages,
+                        system=[{"text": system_prompt}],
+                        inferenceConfig={
+                            "maxTokens": 1024,
+                            "temperature": 0.4,
+                            "topP": 0.9
+                        }
+                    )
+
+                    output_text = response["output"]["message"]["content"][0]["text"]
+                    model_display = candidate_model.split(':')[-2] if ':' in candidate_model else candidate_model
+                    self.last_error = None
+                    return {
+                        "reply": output_text,
+                        "provider": f"Amazon Bedrock ({model_display})",
+                        "model": candidate_model,
+                        "is_fallback": False,
+                        "timestamp": datetime.utcnow().isoformat() + "Z"
                     }
-                )
+                except Exception as e:
+                    self.last_error = f"{candidate_model}: {str(e)}"
+                    logger.error(f"Bedrock invocation failed with {candidate_model}: {e}")
 
-                output_text = response["output"]["message"]["content"][0]["text"]
-                model_display = "NVIDIA Nemotron" if "nemotron" in self.model_id.lower() else self.model_id.split(':')[-2] if ':' in self.model_id else self.model_id
-                return {
-                    "reply": output_text,
-                    "provider": f"Amazon Bedrock ({model_display})",
-                    "model": self.model_id,
-                    "is_fallback": False,
-                    "timestamp": datetime.utcnow().isoformat() + "Z"
-                }
-            except Exception as e:
-                logger.error(f"Bedrock invocation failed with {self.model_id}: {e}. Utilizing contextual local intelligence.")
+                    # If converse fails, try direct invoke_model (for pure invokeModel permission policies)
+                    try:
+                        if "claude" in candidate_model.lower():
+                            body = json.dumps({
+                                "anthropic_version": "bedrock-2023-05-31",
+                                "max_tokens": 1024,
+                                "system": system_prompt,
+                                "messages": bedrock_messages
+                            })
+                            invoke_res = self.client.invoke_model(
+                                modelId=candidate_model,
+                                body=body,
+                                contentType="application/json",
+                                accept="application/json"
+                            )
+                            res_body = json.loads(invoke_res["body"].read())
+                            output_text = res_body.get("content", [{}])[0].get("text", "")
+                            if output_text:
+                                self.last_error = None
+                                return {
+                                    "reply": output_text,
+                                    "provider": f"Amazon Bedrock ({candidate_model})",
+                                    "model": candidate_model,
+                                    "is_fallback": False,
+                                    "timestamp": datetime.utcnow().isoformat() + "Z"
+                                }
+                    except Exception as invoke_err:
+                        logger.error(f"Bedrock invoke_model also failed for {candidate_model}: {invoke_err}")
 
         # Fallback to rich contextual local engine
         reply = self._generate_local_reply(user_message, fleet_context, selected_balloon, weather_context)
         return {
             "reply": reply,
-            "provider": f"Vicky-AI ({'Nemotron Nano' if 'nemotron' in self.model_id.lower() else 'Local Engine'})",
-            "model": self.model_id or "nemotron-nano-3-30b-local",
+            "provider": f"Vicky-AI (Local Engine)",
+            "model": self.model_id or "local-fallback",
             "is_fallback": True,
+            "last_error": self.last_error,
             "timestamp": datetime.utcnow().isoformat() + "Z"
         }
+
 
 
     def _build_system_prompt(
