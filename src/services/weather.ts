@@ -16,12 +16,15 @@ export interface WeatherData {
     };
 }
 
-export async function fetchWeather(lat: number, lon: number): Promise<WeatherData | null> {
+export async function fetchWeather(lat: number, lon: number, cityName?: string): Promise<WeatherData | null> {
     try {
         const params = new URLSearchParams({
             lat: lat.toString(),
             lon: lon.toString(),
         });
+        if (cityName) {
+            params.append('city', cityName);
+        }
 
         // Call our Next.js API proxy route which connects to FastAPI backend / WindBorne API
         let res = await fetch(`/api/weather?${params.toString()}`);

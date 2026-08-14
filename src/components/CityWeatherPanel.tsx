@@ -14,6 +14,8 @@ import {
     Compass,
     Database,
     FileSpreadsheet,
+    FileJson,
+    Download,
     CheckCircle2
 } from 'lucide-react';
 
@@ -32,19 +34,19 @@ export default function CityWeatherPanel({
 }: CityWeatherPanelProps) {
     const [weather, setWeather] = useState<WeatherData | null>(null);
     const [loading, setLoading] = useState(true);
-    const [savedToCSV, setSavedToCSV] = useState(false);
+    const [savedLogs, setSavedLogs] = useState(false);
 
     useEffect(() => {
         let isCancelled = false;
         setLoading(true);
-        setSavedToCSV(false);
+        setSavedLogs(false);
 
-        fetchWeather(lat, lon)
+        fetchWeather(lat, lon, cityName)
             .then((data) => {
                 if (!isCancelled) {
                     setWeather(data);
                     setLoading(false);
-                    setSavedToCSV(true);
+                    setSavedLogs(true);
                 }
             })
             .catch((err) => {
@@ -55,7 +57,26 @@ export default function CityWeatherPanel({
         return () => {
             isCancelled = true;
         };
-    }, [lat, lon]);
+    }, [lat, lon, cityName]);
+
+    const handleDownloadJSON = () => {
+        if (!weather) return;
+        const payload = {
+            city: cityName,
+            coordinates: { latitude: lat, longitude: lon },
+            timestamp: new Date().toISOString(),
+            weather: weather
+        };
+        const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `${cityName.toLowerCase().replace(/[^a-z0-9]/gi, '_')}_weather.json`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+    };
 
     return (
         <div className="absolute top-16 right-4 z-20 w-80 md:w-96 bg-slate-950/95 backdrop-blur-xl border border-slate-800 rounded-xl shadow-2xl overflow-hidden font-mono select-none animate-in fade-in slide-in-from-right-4 duration-200">
@@ -75,12 +96,24 @@ export default function CityWeatherPanel({
                     </div>
                 </div>
 
-                <button
-                    onClick={onClose}
-                    className="p-1.5 bg-slate-900 hover:bg-slate-800 text-slate-400 hover:text-slate-200 rounded-md border border-slate-800 transition-colors"
-                >
-                    <X className="w-4 h-4" />
-                </button>
+                <div className="flex items-center gap-1.5">
+                    {weather && (
+                        <button
+                            onClick={handleDownloadJSON}
+                            title="Download City Weather JSON"
+                            className="p-1.5 bg-slate-900 hover:bg-cyan-950/60 text-slate-400 hover:text-cyan-300 rounded-md border border-slate-800 hover:border-cyan-500/40 transition-colors flex items-center gap-1 text-[11px]"
+                        >
+                            <Download className="w-3.5 h-3.5" />
+                            <span className="hidden sm:inline">JSON</span>
+                        </button>
+                    )}
+                    <button
+                        onClick={onClose}
+                        className="p-1.5 bg-slate-900 hover:bg-slate-800 text-slate-400 hover:text-slate-200 rounded-md border border-slate-800 transition-colors"
+                    >
+                        <X className="w-4 h-4" />
+                    </button>
+                </div>
             </div>
 
             {/* Content */}
@@ -88,7 +121,7 @@ export default function CityWeatherPanel({
                 {loading ? (
                     <div className="py-8 text-center text-xs text-slate-400 animate-pulse space-y-2">
                         <div className="text-cyan-400 font-bold">Querying Live Weather API...</div>
-                        <div className="text-[10px] text-slate-500">Fetching WeatherMesh & logging metrics</div>
+                        <div className="text-[10px] text-slate-500">Fetching WeatherMesh & saving JSON</div>
                     </div>
                 ) : weather ? (
                     <>
@@ -149,11 +182,11 @@ export default function CityWeatherPanel({
                             </div>
                         </div>
 
-                        {/* Local CSV Storage Status */}
+                        {/* Local Storage Status (JSON + CSV) */}
                         <div className="p-2.5 rounded-lg bg-emerald-950/40 border border-emerald-800/60 text-emerald-300 text-[11px] flex items-center justify-between">
                             <div className="flex items-center gap-1.5">
-                                <FileSpreadsheet className="w-4 h-4 text-emerald-400 shrink-0" />
-                                <span>Recorded to local CSV log</span>
+                                <FileJson className="w-4 h-4 text-emerald-400 shrink-0" />
+                                <span>Saved to weather_data_log.json & CSV</span>
                             </div>
                             <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
                         </div>
