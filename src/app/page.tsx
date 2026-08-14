@@ -7,6 +7,7 @@ import CityWeatherPanel from '@/components/CityWeatherPanel';
 import TimelineControls from '@/components/TimelineControls';
 import MapComponent from '@/components/Map';
 import WeatherEffects from '@/components/WeatherEffects';
+import VickyChat from '@/components/VickyChat';
 import { Balloon, fetchWindBorneData, checkBackendHealth, BackendHealthStatus } from '@/services/windborne';
 import { fetchWeather, WeatherData } from '@/services/weather';
 import { ShieldAlert } from 'lucide-react';
@@ -23,6 +24,8 @@ export default function Home() {
   const [isTrackingCamera, setIsTrackingCamera] = useState(false);
   const [healthStatus, setHealthStatus] = useState<BackendHealthStatus | null>(null);
   const [currentWeather, setCurrentWeather] = useState<WeatherData | null>(null);
+  const [isChatOpen, setIsChatOpen] = useState(false);
+
 
   // Timeline scrubbing — Date.now() must NOT run during render (SSR hydration mismatch).
   // Initialize after mount, then keep the live edge fresh on an interval.
@@ -177,6 +180,8 @@ export default function Home() {
           setAutoRotate(false);
           setIsTrackingCamera(false);
         }}
+        onToggleChat={() => setIsChatOpen((prev) => !prev)}
+        isChatOpen={isChatOpen}
       />
 
       {/* Main Content Area */}
@@ -210,6 +215,15 @@ export default function Home() {
           />
         )}
 
+        {/* Vicky-AI Amazon Bedrock Co-Pilot Chat Drawer */}
+        <VickyChat
+          balloons={balloons}
+          selectedBalloon={selectedBalloon}
+          weather={currentWeather}
+          isOpen={isChatOpen}
+          onToggle={() => setIsChatOpen((prev) => !prev)}
+        />
+
         {/* Direct Telemetry Fallback Warning Notification */}
         {healthStatus?.directMode && (
           <div className="absolute top-3 left-1/2 -translate-x-1/2 z-20 bg-amber-950/90 border border-amber-700/80 text-amber-200 px-3.5 py-1.5 rounded-lg shadow-xl text-xs font-mono flex items-center gap-2 backdrop-blur-md">
@@ -217,6 +231,7 @@ export default function Home() {
             <span>FastAPI Backend Offline • Direct Telemetry Mode Active</span>
           </div>
         )}
+
 
         {/* Tracking indicator */}
         {isTrackingCamera && selectedBalloon && (

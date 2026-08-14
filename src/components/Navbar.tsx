@@ -1,7 +1,7 @@
 'use client';
 
 import React, { useState, useEffect } from 'react';
-import { Globe, Search, RefreshCw, Compass, MapPin, X } from 'lucide-react';
+import { Globe, Search, RefreshCw, Compass, MapPin, X, Bot, Sparkles } from 'lucide-react';
 import { cn, formatUTCTime } from '@/lib/utils';
 import { Balloon, BackendHealthStatus } from '@/services/windborne';
 
@@ -22,6 +22,8 @@ interface NavbarProps {
     onRefresh: () => void;
     healthStatus: BackendHealthStatus | null;
     onResetCamera: () => void;
+    onToggleChat?: () => void;
+    isChatOpen?: boolean;
 }
 
 export default function Navbar({
@@ -33,8 +35,11 @@ export default function Navbar({
     loading,
     onRefresh,
     healthStatus,
-    onResetCamera
+    onResetCamera,
+    onToggleChat,
+    isChatOpen = false
 }: NavbarProps) {
+
     const [utcTime, setUtcTime] = useState<string>('');
     const [searchQuery, setSearchQuery] = useState('');
     const [searchResults, setSearchResults] = useState<SearchResult[]>([]);
@@ -190,6 +195,22 @@ export default function Navbar({
                     <span className="text-[9px] text-slate-500 font-mono">SYSTEM CLOCK</span>
                 </div>
 
+                {onToggleChat && (
+                    <button
+                        onClick={onToggleChat}
+                        title="Vicky-AI Amazon Bedrock Co-Pilot"
+                        className={cn(
+                            "flex items-center gap-1.5 px-2.5 py-1.5 rounded-md text-xs font-bold font-mono transition-all border",
+                            isChatOpen
+                                ? "bg-cyan-500 text-slate-950 border-cyan-400 shadow-lg shadow-cyan-500/30"
+                                : "bg-cyan-950/80 hover:bg-cyan-900 text-cyan-300 border-cyan-700/60"
+                        )}
+                    >
+                        <Bot className={cn("w-3.5 h-3.5", !isChatOpen && "animate-pulse text-cyan-400")} />
+                        <span className="hidden sm:inline">Vicky-AI</span>
+                    </button>
+                )}
+
                 <button
                     onClick={onResetCamera}
                     title="Reset Globe View"
@@ -207,6 +228,7 @@ export default function Navbar({
                     <RefreshCw className={cn("w-4 h-4", loading && "animate-spin")} />
                 </button>
             </div>
+
         </header>
     );
 }

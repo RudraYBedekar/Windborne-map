@@ -9,6 +9,7 @@ from typing import List, Dict, Any, Optional
 from pydantic import BaseModel
 
 from services.windborne import WindBorneClient
+from services.bedrock import BedrockChatService
 
 try:
     from dotenv import load_dotenv
@@ -42,8 +43,10 @@ load_env_files()
 
 app = FastAPI(title="Windborne API Service")
 wb_client = WindBorneClient()
+bedrock_service = BedrockChatService()
 
 WINDBORNE_TOKEN = os.getenv("WB_API_KEY") or os.getenv("WINDBORNE_TOKEN") or os.getenv("WINDBORNE_API_KEY")
+
 
 allowed_origins_env = os.getenv("ALLOWED_ORIGINS", "*")
 allowed_origins = [o.strip() for o in allowed_origins_env.split(",") if o.strip()]
@@ -71,6 +74,16 @@ class Balloon(BaseModel):
     path: List[BalloonPoint]
     color: str
 
+class ChatMessage(BaseModel):
+    role: str
+    content: str
+
+class ChatRequest(BaseModel):
+    messages: List[ChatMessage]
+    fleet_context: Optional[Dict[str, Any]] = None
+    selected_balloon: Optional[Dict[str, Any]] = None
+    weather_context: Optional[Dict[str, Any]] = None
+
 @app.get("/")
 @app.get("/health")
 def read_root():
@@ -78,7 +91,8 @@ def read_root():
         "status": "online",
         "service": "Windborne FastAPI Ingestion Engine",
         "version": "2.0.0",
-        "has_wb_key": bool(WINDBORNE_TOKEN)
+        "has_wb_key": bool(WINDBORNE_TOKEN),
+        "bedrock_status": bedrock_service.get_status()
     }
 
 @app.get("/debug/v1/auth_status")
@@ -87,7 +101,26 @@ async def get_auth_status():
     """Debug / Auth check endpoint for WindBorne API key status."""
     return await wb_client.check_auth()
 
+@app.get("/api/chat/status")
+async def get_chat_status():
+    """Returns Amazon Bedrock model and configuration status."""
+    return bedrock_service.get_status()
+
+@app.post("/api/chat")
+async def chat_with_vicky(req: ChatRequest):
+    """
+    Chat endpoint with Vicky-AI, powered by Amazon Bedrock or contextual fallback.
+    """
+    msgs = [{"role": m.role, "content": m.content} for m in req.messages]
+    return await bedrock_service.generate_response(
+        messages=msgs,
+        fleet_context=req.fleet_context,
+        selected_balloon=req.selected_balloon,
+        weather_context=req.weather_context
+    )
+
 @app.get("/api/weather")
+
 async def get_weather(lat: float, lon: float):
     """
     Fetch weather forecast for given coordinates using WindBorne WeatherMesh.
