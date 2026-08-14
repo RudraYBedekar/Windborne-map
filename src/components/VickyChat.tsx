@@ -47,13 +47,6 @@ interface VickyChatProps {
     onAction?: (action: any) => void;
 }
 
-const QUICK_PROMPTS = [
-    { label: 'Weather here', prompt: 'What are the current WeatherMesh conditions for the selected location or map center?' },
-    { label: 'Fairfax weather', prompt: 'weather in Fairfax, Virginia' },
-    { label: 'What is pressure?', prompt: 'What does sea-level pressure mean for balloon operations?' },
-    { label: 'Solar terminator', prompt: 'What is a solar terminator?' },
-];
-
 export default function VickyChat({
     balloons,
     selectedBalloon,
@@ -379,24 +372,10 @@ export default function VickyChat({
                         {loading && (
                             <div className="flex items-center gap-2 text-cyan-400 bg-slate-900/80 border border-slate-800 p-2.5 rounded-xl mr-auto text-xs animate-pulse">
                                 <Bot className="w-4 h-4 text-cyan-400" />
-                                <span>Calling grounded tools via {displayModel}…</span>
+                                <span>Thinking…</span>
                             </div>
                         )}
                         <div ref={messagesEndRef} />
-                    </div>
-
-                    <div className="px-2.5 py-1.5 bg-slate-950/80 border-t border-slate-800/80 overflow-x-auto flex gap-1.5 shrink-0">
-                        {QUICK_PROMPTS.map((qp, idx) => (
-                            <button
-                                key={idx}
-                                onClick={() => handleSendMessage(qp.prompt)}
-                                disabled={loading}
-                                className="px-2 py-1 bg-slate-900/90 hover:bg-cyan-950 hover:border-cyan-700 text-slate-300 hover:text-cyan-300 border border-slate-800 rounded-md text-[10px] whitespace-nowrap transition-all flex items-center gap-1 disabled:opacity-50"
-                            >
-                                <Sparkles className="w-2.5 h-2.5 text-cyan-400" />
-                                {qp.label}
-                            </button>
-                        ))}
                     </div>
 
                     <div className="p-2.5 bg-slate-900/90 border-t border-slate-800 flex items-center gap-2">

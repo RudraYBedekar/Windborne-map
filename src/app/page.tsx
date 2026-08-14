@@ -239,12 +239,6 @@ export default function Home() {
           </div>
         )}
 
-        {!SHOW_BALLOONS && (
-          <div className="absolute top-3 left-1/2 -translate-x-1/2 z-20 bg-slate-950/90 border border-slate-700 text-slate-300 px-3.5 py-1.5 rounded-lg shadow-xl text-xs font-mono backdrop-blur-md">
-            Balloon markers hidden — Treasure feed not operationally accurate · WeatherMesh + Vicky-AI available
-          </div>
-        )}
-
         {SHOW_BALLOONS && isTrackingCamera && selectedBalloon && (
           <div className="absolute top-3 left-1/2 -translate-x-1/2 z-20 bg-cyan-950/90 border border-cyan-700/80 text-cyan-200 px-3.5 py-1.5 rounded-lg shadow-xl text-xs font-mono flex items-center gap-2 backdrop-blur-md">
             <span className="w-2 h-2 rounded-full bg-cyan-400 animate-pulse" />

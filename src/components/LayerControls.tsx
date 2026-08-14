@@ -99,43 +99,34 @@ export default function LayerControls({
               WEATHER OVERLAYS
             </p>
             <div className="space-y-1">
-              {WEATHER_LAYER_OPTIONS.map((opt) => {
-                const locked = Boolean(opt.requiresKey) && !mapKeys.hasOpenWeather;
+              {WEATHER_LAYER_OPTIONS.filter(
+                (opt) => !opt.requiresKey || mapKeys.hasOpenWeather
+              ).map((opt) => {
                 const active = weatherLayers[opt.id];
                 return (
                   <button
                     key={opt.id}
                     type="button"
-                    disabled={locked}
                     onClick={() => onToggleWeather(opt.id)}
                     title={
-                      locked
-                        ? 'Requires NEXT_PUBLIC_OPENWEATHER_KEY in .env.local'
-                        : opt.id === 'radar' && radarAgeLabel
+                      opt.id === 'radar' && radarAgeLabel
                         ? `Radar sync: ${radarAgeLabel}`
                         : undefined
                     }
                     className={cn(
                       'w-full flex items-center gap-2 rounded-lg px-2.5 py-1.5 text-xs transition-all border',
-                      locked && 'opacity-40 cursor-not-allowed border-slate-800/40 bg-slate-900/20 text-slate-600',
-                      !locked && active && 'bg-sky-950/90 border-sky-500/80 text-sky-200 font-bold',
-                      !locked && !active && 'bg-slate-900/60 border-slate-800/80 text-slate-400 hover:bg-slate-850 hover:text-slate-200'
+                      active && 'bg-sky-950/90 border-sky-500/80 text-sky-200 font-bold',
+                      !active && 'bg-slate-900/60 border-slate-800/80 text-slate-400 hover:bg-slate-850 hover:text-slate-200'
                     )}
                   >
                     {WEATHER_ICONS[opt.id]}
                     <span className="flex-1 text-left">{opt.label}</span>
-                    {locked ? (
-                      <span className="text-[9px] px-1 rounded bg-amber-950 text-amber-400 border border-amber-800">
-                        KEY REQ
-                      </span>
-                    ) : (
-                      <span
-                        className={cn(
-                          'w-2 h-2 rounded-full',
-                          active ? 'bg-emerald-400 shadow-[0_0_8px_#34d399]' : 'bg-slate-700'
-                        )}
-                      />
-                    )}
+                    <span
+                      className={cn(
+                        'w-2 h-2 rounded-full',
+                        active ? 'bg-emerald-400 shadow-[0_0_8px_#34d399]' : 'bg-slate-700'
+                      )}
+                    />
                   </button>
                 );
               })}
@@ -145,12 +136,6 @@ export default function LayerControls({
               <p className="mt-2 text-[9px] text-slate-500 flex items-center gap-1">
                 <Info className="w-3 h-3 text-cyan-400 shrink-0" />
                 Live Radar • {radarAgeLabel}
-              </p>
-            )}
-
-            {!mapKeys.hasOpenWeather && (
-              <p className="mt-2 text-[9px] text-slate-500 leading-snug">
-                Configure <code className="text-cyan-400">NEXT_PUBLIC_OPENWEATHER_KEY</code> to enable global clouds, temperature, and wind raster layers.
               </p>
             )}
           </div>
