@@ -1,186 +1,223 @@
-# Windborne Technical Documentation
+# Windborne
 
-## System Overview
+Interactive 3D globe for tracking WindBorne Systems stratospheric balloons, with live WeatherMesh forecasts and radar overlays.
 
-Windborne is an interactive 3D weather visualization platform designed to track global hot air balloon telemetry. The system provides a unified interface for visualizing geospatial data, rendering real-time weather effects, and exploring flight paths on a dynamic 3D globe. It is built to facilitate both casual exploration and detailed data analysis of balloon flight patterns.
+**API check commands:** see [`API_CHECK.md`](./API_CHECK.md)
 
-## Getting Started
+---
 
-Follow these steps to set up the project locally for development or testing.
+## What we have done so far
+
+### 1. Core app (initial build)
+- Next.js 16 + React 19 + Tailwind UI
+- 3D globe via MapLibre / `react-map-gl` (rotate, zoom, tilt)
+- Balloon markers, pulsing dots, click-to-select
+- Animated flight path (~2.5s draw)
+- Sidebar balloon list, refresh, auto-rotate
+- Nominatim location search
+- FastAPI backend that pulls 24h Treasure telemetry (`00.json`–`23.json`)
+
+### 2. Google Earth–style globe + weather layers
+- Default **satellite Earth** basemap (Esri, no key required)
+- Basemap switcher: Earth / Hybrid / Dark / Streets
+- Atmosphere (`setSky`) and Earth-like fly-to on balloon select
+- **Live radar** from RainViewer (no key, refreshes every 5 minutes)
+- Optional Clouds / Temp / Wind tiles when `NEXT_PUBLIC_OPENWEATHER_KEY` is set
+- Optional MapTiler satellite + 3D terrain when `NEXT_PUBLIC_MAPTILER_KEY` is set
+- Layers panel (bottom-right)
+- Redesigned cyan balloon icon (`public/balloon.svg`)
+
+### 3. Official WindBorne WeatherMesh forecast (verified)
+- Working endpoint:
+
+```text
+https://api.windbornesystems.com/forecasts/v1/mm/point_forecast?coordinates=<lat>,<lon>
+```
+
+- Bearer auth with backend-only `WB_API_KEY` (never sent to the browser)
+- FastAPI `WindBorneClient` normalizes the real response:
+  - `forecasts` is a **nested** list: `forecasts[0] = [hourly records...]`
+  - picks the hourly record closest to current UTC
+  - maps `temperature_2m`, `pressure_msl`, `precipitation`, `wind_speed_10m`
+  - wind direction from `wind_u_10m` / `wind_v_10m`
+  - humidity from temperature + dewpoint, or `null` (not invented)
+- UI weather cards show **WindBorne WeatherMesh**, not Open-Meteo
+- Open-Meteo is a **real fallback only** (401/403/429/5xx/timeout/network/invalid JSON)
+- 5-minute cache is WindBorne-only so fallback data cannot masquerade as WeatherMesh
+- Last local verification: HTTP 200, provider `WindBorne WeatherMesh`, fallback **NO**
+
+### 4. Supporting UI / data
+- Balloon detail panel + city weather panel
+- Weather-driven particle overlay (rain/snow/wind from real metrics)
+- CSV weather log (`weather_data_log.csv`) from `/api/weather`
+- Health proxy: `/api/health` → FastAPI `/health`
+
+---
+
+## Data flow
+
+```text
+Website (localhost:3000)
+   ↓
+Next.js /api/weather  and  /api/windborne
+   ↓
+FastAPI (localhost:8000)
+   ↓
+WindBorne official API
+   ├── Treasure telemetry  → balloon positions
+   └── /forecasts/v1/mm/point_forecast → WeatherMesh
+         200 → parse → website
+         failure → log exact reason → Open-Meteo fallback
+```
+
+---
+
+## Getting started
 
 ### Prerequisites
-*   Node.js (v18 or higher)
-*   npm, yarn, or pnpm
-*   **Python 3.8+** (for the backend data service)
+- Node.js 18+
+- Python 3.8+
+- A WindBorne API key in `backend/.env` (for weather)
 
-### Data Accuracy & Sources
-This project visualizes **real-world data** with high accuracy:
--   **Balloon Positions**: Fetched in real-time from Windborne Systems' public [Treasure API](https://windbornesystems.com). These coords represent actual payloads currently in the stratosphere.
--   **Globe**: Uses a geodetically accurate 3D globe projection (MapLibre GL).
--   **Weather**: Live local weather conditions (Wind/Temp) are fetched from [OpenMeteo](https://open-meteo.com/) based on the balloon's precise coordinates.
+### Backend
 
-### Backend Setup (Required)
+```powershell
+cd backend
+copy .env.example .env
+# edit .env and set WB_API_KEY
+pip install -r requirements.txt
+python -m uvicorn main:app --reload --host 127.0.0.1 --port 8000
+```
 
-The data fetching logic is powered by a Python FastAPI service. You must run this service for the map to display data.
+`backend/.env`:
 
-1.  **Navigate to backend directory**
-    ```bash
-    cd backend
-    ```
+```env
+WB_API_KEY=your_windborne_api_key
+WINDBORNE_BASE_URL=https://api.windbornesystems.com
+```
 
-2.  **Install Python Dependencies**
-    ```bash
-    pip install -r requirements.txt
-    ```
+Optional frontend keys (later) in `.env.local`:
 
-3.  **Start the Python Server**
-    ```bash
-    uvicorn main:app --reload
-    ```
-    The server will run at `http://localhost:8000`.
+```env
+NEXT_PUBLIC_MAPTILER_KEY=
+NEXT_PUBLIC_OPENWEATHER_KEY=
+```
 
-### Frontend Installation
+### Frontend
 
-1.  **Clone the Repository**
-    ```bash
-    git clone https://github.com/yourusername/windborne.git
-    cd windborne
-    ```
+```powershell
+npm install
+npm run dev
+```
 
-2.  **Install Dependencies**
-    ```bash
-    npm install
-    # or
-    yarn install
-    # or
-    pnpm install
-    ```
+Open [http://localhost:3000](http://localhost:3000)
 
-3.  **Run Development Server**
-    ```bash
-    npm run dev
-    ```
+---
 
-4.  **Access the Application**
-    Open your browser and navigate to `http://localhost:3000`.
+## How to use
 
-## User Guide
+1. **Globe** — drag to rotate, scroll to zoom, right-drag to tilt
+2. **Balloons** — click a marker to fly the camera, draw the path, and open telemetry + WeatherMesh
+3. **Search** — city/country → camera flies there and loads city weather
+4. **Layers** — Earth / Hybrid / Dark / Streets + Radar (and keyed weather layers)
+5. **Rotate** — globe auto-rotate toggle in the top-right
 
-How to use the Windborne platform features:
+---
 
-1.  **Explore the Globe**
-    *   **Rotate**: Click and drag to rotate the 3D globe.
-    *   **Zoom**: Use the scroll wheel to zoom in and out.
-    *   **Tilt**: Right-click and drag to change the pitch/tilt of the map.
+## How to check the API
 
-2.  **Track Balloons**
-    *   Look for the **Balloon Icons** scatter across the map.
-    *   **Click** on any balloon to select it. This will:
-        *   Zoom the camera to the balloon.
-        *   Animate the flight path drawing on the map.
-        *   Open the **Details Card** with live telemetry (Altitude, Speed) and weather data.
+Full command list (PowerShell + curl): **[`API_CHECK.md`](./API_CHECK.md)**
 
-3.  **Search Locations**
-    *   Use the search bar at the top center.
-    *   Type a city or country name (e.g., "Paris", "Japan").
-    *   Select a result to automatically fly the camera to that location.
+Quick check after both servers are running:
 
-4.  **View Weather**
-    *   Upon loading, a dynamic weather overlay (Rain, Snow, or Wind) will appear briefly.
-    *   Real-time weather data for a specific balloon's location is displayed in the Details Card when a balloon is selected.
+```powershell
+# FastAPI health
+Invoke-RestMethod http://127.0.0.1:8000/health
 
-## Architecture Overview
+# Official weather through our backend
+Invoke-RestMethod "http://127.0.0.1:8000/api/weather?lat=38.84&lon=-77.30" | ConvertTo-Json -Depth 6
 
-The application follows a modern, component-based architecture using the **Next.js App Router**.
+# Same path the website uses
+Invoke-RestMethod "http://localhost:3000/api/weather?lat=38.84&lon=-77.30" | ConvertTo-Json -Depth 6
+```
 
-### High-Level Components
+You want:
 
-*   **Frontend Client (Next.js/React)**: Handles the UI, state management, and rendering of the application shell.
-*   **Map Visualization Layer (MapLibre GL JS)**: A WebGL-powered mapping engine responsible for rendering the 3D globe, terrain, and geospatial vectors (balloons, paths).
-*   **Data Services Layer**: Typed TypeScript services that abstract API communication for balloon telemetry and weather data.
-*   **Presentation Layer**: Uses Tailwind CSS for a responsive, "glassmorphism" design system that overlays the complex map visualization.
+```text
+provider: WindBorne WeatherMesh
+```
 
-### Architecture Diagram (Conceptual)
+not:
+
+```text
+provider: Open-Meteo (Fallback)
+```
+
+---
+
+## Architecture
+
+| Layer | Stack |
+|---|---|
+| Frontend | Next.js App Router, React, Tailwind |
+| Globe | MapLibre GL + react-map-gl, globe projection |
+| Backend | FastAPI + httpx |
+| Balloon data | WindBorne Treasure `a.windbornesystems.com/treasure/{00-23}.json` |
+| Weather | WindBorne WeatherMesh `forecasts/v1/mm/point_forecast` |
+| Radar | RainViewer (no key) |
+| Search | OpenStreetMap Nominatim |
+| Fallback weather | Open-Meteo (only if WindBorne fails) |
 
 ```mermaid
 graph TD
-    Client[Client Browser] --> Next[Next.js App Server]
-    Client --> MapLibre[MapLibre GL Context]
-    
-    subgraph Data Flow
-    Next -- Telemetry Data --> API[/api/windborne]
-    API --> Client
-    Client -- User Search --> Nominatim[OpenStreetMap Nominatim API]
-    Client -- Weather Data --> OpenMeteo[Weather API]
-    end
-    
-    subgraph Visualization
-    Client --> WeatherFX[WeatherEffects Overlay]
-    Client --> Globe[3D Globe Projection]
-    Globe -- Renders --> Balloons[Balloon Vectors]
-    Globe -- Renders --> Paths[Flight Paths]
-    end
+    Client[Browser] --> Next[Next.js]
+    Client --> MapLibre[MapLibre 3D Globe]
+    Next --> WBProxy["/api/windborne"]
+    Next --> WxProxy["/api/weather"]
+    Next --> Health["/api/health"]
+    WBProxy --> FastAPI[FastAPI :8000]
+    WxProxy --> FastAPI
+    FastAPI --> Treasure[Treasure telemetry]
+    FastAPI -->|Bearer WB_API_KEY| Mesh[WeatherMesh point_forecast]
+    FastAPI -.->|failure only| OM[Open-Meteo]
+    Client --> Nominatim[Nominatim search]
+    MapLibre --> Radar[RainViewer radar]
 ```
 
-## Core Features and Implementation Details
+Key files:
 
-### 3D Globe Visualization
-The core of Windborne is the `MapComponent`, which initializes a MapLibre instance with `projection: 'globe'`. 
--   **Implementation**: Utilizes `react-map-gl` to bridge React state with the imperative MapLibre API.
--   **Terrain**: Rendering of 3D terrain exaggeration (1.5x) to visualize altitude differences.
--   **Atmosphere**: Custom atmospheric styling to simulate horizon glow and depth.
+| File | Role |
+|---|---|
+| `backend/main.py` | FastAPI routes: `/health`, `/windborne`, `/api/weather` |
+| `backend/services/windborne.py` | Official forecast client, normalize, cache, fallback |
+| `src/app/api/weather/route.ts` | Next.js weather proxy |
+| `src/app/api/windborne/route.ts` | Next.js balloon proxy |
+| `src/components/Map.tsx` | Globe, balloons, layers |
+| `src/components/LayerControls.tsx` | Basemap + weather toggles |
+| `src/services/weather.ts` | Frontend weather client |
+| `src/config/map.ts` | Basemap / tile / key config |
 
-### Real-Time Weather Effects
-Weather visualization is handled by two distinct subsystems:
-1.  **Visual Overlay (`WeatherEffects.tsx`)**: A particle system built with CSS animations and React state that renders dynamic rain, snow, or wind effects. These effects are randomized on session start and fade out to reveal the map.
-2.  **Data Visualization**: The details card fetches and displays live weather metrics (Temperature, Wind Speed) for the selected location using the `fetchWeather` utility.
+---
 
-### Balloon Tracking and Flight Paths
-Balloons are rendered as interactive vector features.
--   **Custom Markers**: SVG Balloon icons are loaded into the map sprite sheet for performant rendering of hundreds of entities.
--   **Pulsing Indicators**: A custom HTML5 Canvas source generates a "pulsing dot" animation at the balloon's current location to attract user attention.
--   **Flight Paths**: When a balloon is selected, the system draws its historical path using a `LineString` feature. 
-    -   *Animation*: A `requestAnimationFrame` loop progressively renders the line segment, creating a "drawing" effect from launch to current position over 2.5 seconds.
+## Last verified WeatherMesh result
 
-### Interactive Data Exploration
--   **Selection Logic**: Clicking a balloon triggers a `flyTo` camera animation, zooming into the target while maintaining a 3D pitch.
--   **Details Card**: A glassmorphic UI panel overlays the map, displaying altitude, coordinates, and associated weather data.
--   **Points of Interest (POIs)**: Curated locations (e.g., launch sites) utilize the GeoJSON source to display labeled markers.
+```text
+Endpoint used: https://api.windbornesystems.com/forecasts/v1/mm/point_forecast?coordinates=38.84,-77.3
+HTTP status: 200
+Provider returned: WindBorne WeatherMesh
+Forecast timestamp: 2026-08-13T21:00:00Z
+Temperature: 32.2
+Pressure: 1012.1
+Wind speed: 2.0
+Fallback used: NO
+```
 
-### Search and Navigation
--   **Geocoding**: Integrated with the OpenStreetMap Nominatim API.
--   **User Flow**: Users type a query -> System fetches lat/lon -> Map camera performs an essential flight animation to the new bounding box.
+---
 
-## Data Flow (Step-by-Step)
+## Not done yet
 
-1.  **Initialization**:
-    -   The application loads `page.tsx`, mounting the `MapComponent`.
-    -   `WeatherEffects.tsx` assesses a random weather type and begins particle animation.
-
-2.  **Data Ingestion**:
-    -   `useEffect` hooks trigger `fetchWindBorneData`, ensuring types match the `Balloon` interface.
-    -   Data is transformed into Memoized GeoJSON `FeatureCollections` for the map source.
-
-3.  **Rendering**:
-    -   MapLibre renders the base dark matter tiles.
-    -   Balloon sources are added; the map waits for the SVG icon image `onload` event.
-
-4.  **Interaction**:
-    -   **User Click**: Event handler captures the feature ID.
-    -   **State Update**: `selectedId` updates, triggering the specific path render and details card visibility.
-    -   **Camera Move**: The map view automates a smooth transition to the selected entity.
-
-## Design Goals
-
--   **Visual Premium**: The interface uses a deep palette (Dark Matter map style, `#020409` backgrounds) with high-contrast neon accents (Cyan/Yellow) to convey a high-tech, dashboard aesthetic.
--   **Performance**: 
-    -   Heavy computation (particle effects, map rendering) is offloaded to the GPU via WebGL and CSS transforms.
-    -   React `useMemo` is strictly used for GeoJSON generation to prevent re-parsing large datasets on every render.
--   **Discoverability**: Critical data is hidden until interaction (hover/click) to maintain a clean "Blue Marble" view of the globe.
-
-## Future Enhancements
-
--   **WebSocket Integration**: Replace polling with live WebSocket connections for sub-second telemetry updates.
--   **Historical Playback**: A scrubber UI to replay flight paths over time (e.g., "Last 24 Hours").
--   **Volumetric Clouds**: Upgrade simple particle effects to 3D volumetric cloud layers using Three.js custom layers within MapLibre.
--   **User Accounts**: Save favorite balloons or launch sites.
+- WebSockets for live balloon updates (currently polls ~60s)
+- Historical playback scrubber
+- Volumetric clouds / Three.js layers
+- User accounts / favorites
+- AWS / Bedrock / MCP / production deploy

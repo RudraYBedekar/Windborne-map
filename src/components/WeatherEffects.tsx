@@ -1,116 +1,120 @@
 'use client';
 
-import React, { useEffect, useState } from 'react';
+import React, { useMemo } from 'react';
+import { WeatherData } from '@/services/weather';
 import { cn } from '@/lib/utils';
 
-type WeatherType = 'rain' | 'snow' | 'wind' | 'none';
+interface WeatherEffectsProps {
+    weather?: WeatherData | null;
+}
 
-export default function WeatherEffects() {
-    const [weather, setWeather] = useState<WeatherType>('none');
-    const [particles, setParticles] = useState<number[]>([]);
+type Mode = 'rain' | 'snow' | 'wind' | 'none';
 
-    const [isVisible, setIsVisible] = useState(true);
+export default function WeatherEffects({ weather }: WeatherEffectsProps) {
+    // Determine actual weather particle mode from real meteorological metrics
+    const mode: Mode = useMemo(() => {
+        if (!weather) return 'none';
 
-    useEffect(() => {
-        // Randomly select weather (removed 'none' for visibility assurance)
-        const types: WeatherType[] = ['rain', 'snow', 'wind'];
-        const randomType = types[Math.floor(Math.random() * types.length)];
-        setWeather(randomType);
+        const precip = weather.precipitation ?? 0;
+        const temp = weather.temperature ?? 15;
+        const windSpeed = weather.windSpeed ?? 0;
 
-        // Generate particle count based on type
-        const count = randomType === 'rain' ? 150 : randomType === 'snow' ? 70 : 30;
-        setParticles(Array.from({ length: count }, (_, i) => i));
+        if (precip > 0.1) {
+            return temp <= 0 ? 'snow' : 'rain';
+        }
+        if (windSpeed > 20) {
+            return 'wind';
+        }
+        return 'none';
+    }, [weather]);
 
-        // Fade out after 6 seconds
-        const timer = setTimeout(() => {
-            setIsVisible(false);
-        }, 6000);
+    // Particle count scaled according to weather severity
+    const particles = useMemo(() => {
+        if (mode === 'none' || !weather) return [];
+        let count = 25;
+        if (mode === 'rain') {
+            count = Math.min(Math.max(Math.round((weather.precipitation || 1) * 30), 40), 120);
+        } else if (mode === 'snow') {
+            count = 50;
+        } else if (mode === 'wind') {
+            count = Math.min(Math.max(Math.round((weather.windSpeed || 20) * 1.5), 25), 70);
+        }
+        return Array.from({ length: count }, (_, i) => i);
+    }, [mode, weather]);
 
-        return () => clearTimeout(timer);
-    }, []);
+    if (mode === 'none') return null;
 
-    if (weather === 'none') return null;
+    const windAngle = weather?.windDirection ?? 90;
 
     return (
-        <div
-            className={cn(
-                "absolute inset-0 pointer-events-none z-50 overflow-hidden transition-opacity duration-1000 ease-out",
-                isVisible ? "opacity-100" : "opacity-0"
-            )}
-        >
+        <div className="absolute inset-0 pointer-events-none z-10 overflow-hidden opacity-60 transition-opacity duration-1000">
             {particles.map((i) => {
-                const style = getRandomStyle(weather, i);
+                const style = getParticleStyle(mode, i, windAngle);
                 return (
                     <div
                         key={i}
                         className={cn(
                             "absolute",
-                            weather === 'rain' && "w-[1px] h-4 bg-gradient-to-b from-blue-300/10 to-blue-400/60",
-                            weather === 'snow' && "w-1.5 h-1.5 bg-white/60 rounded-full blur-[1px]",
-                            weather === 'wind' && "h-[1px] bg-gradient-to-r from-transparent via-white/20 to-transparent",
+                            mode === 'rain' && "w-[1.5px] h-6 bg-gradient-to-b from-sky-300/20 via-cyan-400/80 to-blue-500/90 rounded-full",
+                            mode === 'snow' && "w-1.5 h-1.5 bg-slate-100/80 rounded-full blur-[0.5px]",
+                            mode === 'wind' && "h-[1.5px] bg-gradient-to-r from-transparent via-cyan-300/50 to-transparent rounded-full"
                         )}
                         style={style}
                     />
                 );
             })}
             <style jsx>{`
-                @keyframes fall {
-                    0% { transform: translateY(-10vh); }
-                    100% { transform: translateY(110vh); }
+                @keyframes rain-fall {
+                    0% { transform: translateY(-20px); }
+                    100% { transform: translateY(105vh); }
                 }
                 @keyframes snow-fall {
-                    0% { transform: translate(0, -10vh); }
-                    25% { transform: translate(20px, 20vh); }
-                    50% { transform: translate(-20px, 50vh); }
-                    75% { transform: translate(20px, 80vh); }
-                    100% { transform: translate(0, 110vh); }
+                    0% { transform: translate(0, -10px); }
+                    50% { transform: translate(25px, 50vh); }
+                    100% { transform: translate(-10px, 105vh); }
                 }
-                @keyframes wind-blow {
-                    0% { transform: translateX(-10vw); opacity: 0; }
-                    50% { opacity: 1; }
-                    100% { transform: translateX(110vw); opacity: 0; }
+                @keyframes wind-streak {
+                    0% { transform: translateX(-20vw); opacity: 0; }
+                    40% { opacity: 0.8; }
+                    100% { transform: translateX(120vw); opacity: 0; }
                 }
             `}</style>
         </div>
     );
 }
 
-function getRandomStyle(type: WeatherType, seed: number): React.CSSProperties {
-    const random = (min: number, max: number) => Math.random() * (max - min) + min;
+function getParticleStyle(mode: Mode, index: number, windAngle: number): React.CSSProperties {
+    const left = `${((index * 17) % 100).toFixed(1)}%`;
+    const top = `${((index * 13) % 100).toFixed(1)}%`;
+    const delay = `${((index * 0.17) % 4).toFixed(2)}s`;
 
-    const left = `${Math.random() * 100}%`;
-    const delay = `${Math.random() * 5}s`;
-
-    if (type === 'rain') {
-        const duration = `${random(0.5, 1.5)}s`;
+    if (mode === 'rain') {
+        const duration = `${(0.6 + (index % 5) * 0.15).toFixed(2)}s`;
         return {
             left,
-            top: `-${random(10, 20)}px`,
-            animation: `fall ${duration} linear infinite`,
+            top: '-20px',
+            animation: `rain-fall ${duration} linear infinite`,
             animationDelay: delay,
-            opacity: random(0.3, 0.7),
+            transform: `rotate(${windAngle - 90}deg)`
         };
-    } else if (type === 'snow') {
-        const duration = `${random(3, 8)}s`;
+    } else if (mode === 'snow') {
+        const duration = `${(3 + (index % 6) * 0.8).toFixed(2)}s`;
         return {
             left,
             top: '-10px',
             animation: `snow-fall ${duration} ease-in-out infinite`,
             animationDelay: delay,
-            opacity: random(0.4, 0.9),
-            transform: `scale(${random(0.5, 1.2)})`,
         };
-    } else if (type === 'wind') {
-        // Wind lines come from left, stick to random tops
-        const top = `${Math.random() * 100}%`;
-        const duration = `${random(1, 3)}s`;
-        const width = `${random(50, 200)}px`;
+    } else if (mode === 'wind') {
+        const duration = `${(1.2 + (index % 4) * 0.3).toFixed(2)}s`;
+        const width = `${(80 + (index % 7) * 20)}px`;
         return {
-            left: '-20%', // Start off screen
+            left: '-20%',
             top,
             width,
-            animation: `wind-blow ${duration} ease-out infinite`,
-            animationDelay: delay, // Stagger them
+            animation: `wind-streak ${duration} linear infinite`,
+            animationDelay: delay,
+            transform: `rotate(${windAngle - 90}deg)`
         };
     }
     return {};

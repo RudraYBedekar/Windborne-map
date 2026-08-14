@@ -1,22 +1,60 @@
-<svg width="60" height="80" viewBox="0 0 60 80" fill="none" xmlns="http://www.w3.org/2000/svg">
-  <filter id="glow">
-    <feGaussianBlur stdDeviation="1.5" result="coloredBlur"/>
-    <feMerge>
-      <feMergeNode in="coloredBlur"/>
-      <feMergeNode in="SourceGraphic"/>
-    </feMerge>
-  </filter>
-  
-  <!-- Envelope -->
-  <path d="M30 0C13.4315 0 0 13.4315 0 30C0 46.5685 13.4315 60 30 60C46.5685 60 60 46.5685 60 30C60 13.4315 46.5685 0 30 0Z" fill="#ff00ff" filter="url(#glow)"/>
-  <path d="M30 0C30 0 42 14 42 30C42 46 30 60 30 60C30 60 18 46 18 30C18 14 30 0 30 0Z" fill="#00ffff" fill-opacity="0.7"/>
-  <path d="M30 0V60" stroke="white" stroke-width="2" stroke-opacity="0.8"/>
-  <path d="M2 30H58" stroke="white" stroke-width="2" stroke-opacity="0.5"/>
-  
-  <!-- Ropes -->
-  <path d="M20 54L24 68" stroke="white" stroke-width="2"/>
-  <path d="M40 54L36 68" stroke="white" stroke-width="2"/>
-  
-  <!-- Basket -->
-  <rect x="22" y="68" width="16" height="12" rx="3" fill="#ffff00" stroke="white" stroke-width="1"/>
+<svg width="64" height="88" viewBox="0 0 64 88" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="envelope" x1="12" y1="4" x2="52" y2="58" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#67E8F9"/>
+      <stop offset="0.45" stop-color="#22D3EE"/>
+      <stop offset="1" stop-color="#0284C7"/>
+    </linearGradient>
+    <linearGradient id="shine" x1="18" y1="8" x2="34" y2="42" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#FFFFFF" stop-opacity="0.85"/>
+      <stop offset="1" stop-color="#FFFFFF" stop-opacity="0"/>
+    </linearGradient>
+    <linearGradient id="basketGrad" x1="24" y1="72" x2="40" y2="86" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#FDE68A"/>
+      <stop offset="1" stop-color="#F59E0B"/>
+    </linearGradient>
+    <filter id="glow" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="2.2" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+  </defs>
+
+  <!-- Soft outer glow -->
+  <ellipse cx="32" cy="34" rx="26" ry="30" fill="#22D3EE" fill-opacity="0.18" filter="url(#glow)"/>
+
+  <!-- Classic hot-air envelope -->
+  <path
+    d="M32 4C18.2 4 8 16.4 8 32.2C8 46.8 18.6 58.4 28.8 62.4L26.5 68H37.5L35.2 62.4C45.4 58.4 56 46.8 56 32.2C56 16.4 45.8 4 32 4Z"
+    fill="url(#envelope)"
+    filter="url(#glow)"
+  />
+
+  <!-- Panel seams -->
+  <path d="M32 6C32 6 22 20 22 34C22 48 32 60 32 60" stroke="#ECFEFF" stroke-opacity="0.35" stroke-width="1.4"/>
+  <path d="M32 6C32 6 42 20 42 34C42 48 32 60 32 60" stroke="#ECFEFF" stroke-opacity="0.35" stroke-width="1.4"/>
+  <path d="M14 28C20 26 44 26 50 28" stroke="#ECFEFF" stroke-opacity="0.28" stroke-width="1.2"/>
+  <path d="M16 42C22 40 42 40 48 42" stroke="#ECFEFF" stroke-opacity="0.22" stroke-width="1.2"/>
+
+  <!-- Highlight gloss -->
+  <path
+    d="M22 14C19.5 20 19 28 21 36C23.2 28.5 26 20 32 12C28 11.2 24.5 11.8 22 14Z"
+    fill="url(#shine)"
+  />
+
+  <!-- Tech ring accent -->
+  <circle cx="32" cy="34" r="9" stroke="#A5F3FC" stroke-opacity="0.55" stroke-width="1.5" fill="none"/>
+  <circle cx="32" cy="34" r="3.2" fill="#ECFEFF" fill-opacity="0.9"/>
+
+  <!-- Rigging -->
+  <path d="M26.5 68L24 74" stroke="#E0F2FE" stroke-width="1.6" stroke-linecap="round"/>
+  <path d="M37.5 68L40 74" stroke="#E0F2FE" stroke-width="1.6" stroke-linecap="round"/>
+  <path d="M32 62.5V74" stroke="#E0F2FE" stroke-width="1.4" stroke-linecap="round" stroke-opacity="0.8"/>
+
+  <!-- Basket / payload -->
+  <rect x="23" y="74" width="18" height="11" rx="2.5" fill="url(#basketGrad)" stroke="#FFF7ED" stroke-width="1.2"/>
+  <path d="M25.5 78H40.5" stroke="#92400E" stroke-opacity="0.35" stroke-width="1"/>
+  <path d="M25.5 81.5H40.5" stroke="#92400E" stroke-opacity="0.35" stroke-width="1"/>
 </svg>
