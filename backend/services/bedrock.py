@@ -8,10 +8,17 @@ logger = logging.getLogger("bedrock_service")
 
 class BedrockChatService:
     def __init__(self):
+        self.enabled = os.getenv("BEDROCK_ENABLED", "true").lower() in ("true", "1", "yes")
         self.region = os.getenv("AWS_REGION") or os.getenv("AWS_DEFAULT_REGION", "us-east-1")
-        self.model_id = os.getenv("BEDROCK_MODEL_ID", "anthropic.claude-3-5-sonnet-20240620-v1:0")
+        self.model_id = (
+            os.getenv("BEDROCK_AGENT_MODEL") or
+            os.getenv("BEDROCK_LLM_MODEL") or
+            os.getenv("BEDROCK_MODEL_ID") or
+            "us.anthropic.claude-haiku-4-5-20251001-v1:0"
+        )
         self.client = None
-        self._init_client()
+        if self.enabled:
+            self._init_client()
 
     def _init_client(self):
         try:
@@ -51,12 +58,14 @@ class BedrockChatService:
     def get_status(self) -> Dict[str, Any]:
         has_aws_keys = bool(os.getenv("AWS_ACCESS_KEY_ID") and os.getenv("AWS_SECRET_ACCESS_KEY"))
         return {
+            "enabled": self.enabled,
             "bedrock_ready": self.client is not None,
             "region": self.region,
             "model_id": self.model_id,
             "auth_method": "Explicit API Keys" if has_aws_keys else "IAM Role / Default Credential Chain",
             "fallback_available": True
         }
+
 
     async def generate_response(
         self,
