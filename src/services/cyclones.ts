@@ -89,6 +89,36 @@ export async function fetchCyclonesGeoJson(opts: {
   }
 }
 
+export async function fetchCyclonesList(): Promise<{
+  ok: boolean;
+  storms: Record<string, CycloneDetail>;
+  initialization_time?: string | null;
+  error?: string;
+  message?: string;
+}> {
+  try {
+    const res = await fetch('/api/cyclones?include_details=true', { cache: 'no-store' });
+    const data = (await res.json()) as CycloneListResponse & { detail?: { message?: string } };
+    if (!res.ok) {
+      return {
+        ok: false,
+        storms: {},
+        error: data.error || `HTTP ${res.status}`,
+        message: data.message || data.detail?.message,
+      };
+    }
+    return {
+      ok: Boolean(data.ok),
+      storms: data.tropical_cyclones || {},
+      initialization_time: data.initialization_time,
+      error: data.error,
+      message: data.message,
+    };
+  } catch (e) {
+    return { ok: false, storms: {}, error: 'FETCH_FAILED', message: String(e) };
+  }
+}
+
 export async function fetchCycloneDetail(
   id: string,
   forecastHour: number

@@ -75,6 +75,11 @@ def test_bare_location_heuristic():
     assert ai_tools.look_like_bare_location("how many balloons are active?") is False
     assert ai_tools.look_like_bare_location("weather in fairfax") is False
     assert ai_tools.look_like_bare_location("What is a solar terminator?") is False
+    assert ai_tools.look_like_bare_location("cyclones list") is False
+    assert ai_tools.look_like_bare_location("active hurricanes") is False
+    assert ai_tools.look_like_cyclone_query("cyclones list") is True
+    assert ai_tools.look_like_cyclone_query("Where are the tropical cyclones?") is True
+    assert ai_tools.look_like_cyclone_query("fairfax") is False
 
 
 def test_bedrock_unavailable_does_not_invent_fleet():

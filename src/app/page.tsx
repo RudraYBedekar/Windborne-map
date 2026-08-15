@@ -5,6 +5,7 @@ import Navbar from '@/components/Navbar';
 import BalloonDetailPanel from '@/components/BalloonDetailPanel';
 import CityWeatherPanel from '@/components/CityWeatherPanel';
 import CycloneDetailPanel, { CycloneDetail } from '@/components/CycloneDetailPanel';
+import CycloneListPanel, { CycloneListItem } from '@/components/CycloneListPanel';
 import TimelineControls from '@/components/TimelineControls';
 import ForecastHourControls from '@/components/ForecastHourControls';
 import MapComponent from '@/components/Map';
@@ -24,6 +25,7 @@ import {
   MeshVariable,
   fetchCycloneDetail,
   fetchCyclonesGeoJson,
+  fetchCyclonesList,
   fetchMeshStatus,
   meshPngUrl,
 } from '@/services/cyclones';
@@ -68,6 +70,8 @@ export default function Home() {
   const [cycloneError, setCycloneError] = useState<string | null>(null);
   const [cyclonesEnabled, setCyclonesEnabled] = useState(true);
   const [griddedEnabled, setGriddedEnabled] = useState(true);
+  const [cycloneListItems, setCycloneListItems] = useState<CycloneListItem[]>([]);
+  const [cycloneListLoading, setCycloneListLoading] = useState(false);
 
   const [meshVariable, setMeshVariable] = useState<MeshVariable>('off');
   const [meshForecastHour, setMeshForecastHour] = useState(0);
@@ -195,28 +199,65 @@ export default function Home() {
     selectedBalloon?.latestPoint?.lon,
   ]);
 
-  // Cyclone GeoJSON — refresh on mode / hour / ensemble; poll every 5 min
+  // Cyclone GeoJSON + clickable list — refresh on mode / hour / ensemble; poll every 5 min
   useEffect(() => {
     if (globeMode !== 'cyclones') return;
     let cancelled = false;
 
     const load = async () => {
-      const { geojson, error: err } = await fetchCyclonesGeoJson({
-        forecastHour: cycloneForecastHour,
-        includeEnsemble: showEnsemble,
-      });
+      setCycloneListLoading(true);
+      const [geo, list] = await Promise.all([
+        fetchCyclonesGeoJson({
+          forecastHour: cycloneForecastHour,
+          includeEnsemble: showEnsemble,
+        }),
+        fetchCyclonesList(),
+      ]);
       if (cancelled) return;
-      if (err) {
-        setCycloneError(err);
+
+      if (geo.error) {
+        setCycloneError(geo.error);
         setCycloneGeoJson(null);
-        toast.error(err.slice(0, 120), { id: 'cyclone-load' });
-        return;
+        toast.error(geo.error.slice(0, 120), { id: 'cyclone-load' });
+      } else {
+        setCycloneError(null);
+        setCycloneGeoJson(geo.geojson);
+        const init = (geo.geojson as FeatureCollection & { properties?: { initialization_time?: string } })
+          ?.properties?.initialization_time;
+        if (init) setCycloneInitTime(init);
       }
-      setCycloneError(null);
-      setCycloneGeoJson(geojson);
-      const init = (geojson as FeatureCollection & { properties?: { initialization_time?: string } })
-        ?.properties?.initialization_time;
-      if (init) setCycloneInitTime(init);
+
+      if (list.ok) {
+        const items: CycloneListItem[] = Object.entries(list.storms).map(([id, storm]) => {
+          const path = (storm.path || []) as Array<Record<string, unknown>>;
+          const exact = path.find((p) => p.forecast_hour === cycloneForecastHour);
+          const pt =
+            exact ||
+            path.slice().sort((a, b) => {
+              const ah = typeof a.forecast_hour === 'number' ? a.forecast_hour : 9999;
+              const bh = typeof b.forecast_hour === 'number' ? b.forecast_hour : 9999;
+              return Math.abs(ah - cycloneForecastHour) - Math.abs(bh - cycloneForecastHour);
+            })[0];
+          const gen = storm.genesis;
+          return {
+            id: storm.tropical_cyclone_id || id,
+            storm,
+            latitude:
+              (typeof pt?.latitude === 'number' ? pt.latitude : null) ??
+              (typeof gen?.latitude === 'number' ? gen.latitude : null),
+            longitude:
+              (typeof pt?.longitude === 'number' ? pt.longitude : null) ??
+              (typeof gen?.longitude === 'number' ? gen.longitude : null),
+            forecastHour: typeof pt?.forecast_hour === 'number' ? pt.forecast_hour : null,
+          };
+        });
+        setCycloneListItems(items);
+        if (list.initialization_time) setCycloneInitTime(list.initialization_time);
+      } else if (!geo.error) {
+        setCycloneError(list.message || list.error || 'Cyclone list unavailable');
+        setCycloneListItems([]);
+      }
+      setCycloneListLoading(false);
     };
 
     load();
@@ -343,6 +384,17 @@ export default function Home() {
       />
 
       <div className="flex-1 relative flex h-[calc(100vh-3.5rem)] w-full overflow-hidden">
+        {globeMode === 'cyclones' && (
+          <CycloneListPanel
+            items={cycloneListItems}
+            selectedId={selectedCycloneId}
+            loading={cycloneListLoading}
+            error={cycloneError}
+            initTime={cycloneInitTime}
+            onSelect={selectCyclone}
+          />
+        )}
+
         {selectedLocation && !selectedBalloon && !selectedCyclone && (
           <CityWeatherPanel
             cityName={selectedLocation.name}
@@ -377,6 +429,7 @@ export default function Home() {
             point={cyclonePoint}
             initializationTime={cycloneInitTime}
             onClose={() => setSelectedCycloneId(null)}
+            className="!left-[316px] md:!left-[316px] max-md:!left-3 max-md:!top-[auto] max-md:!bottom-28"
           />
         )}
 
@@ -403,6 +456,9 @@ export default function Home() {
             }
             if (action.type === 'SELECT_BALLOON' && action.balloonId) {
               selectBalloon(String(action.balloonId));
+            }
+            if (action.type === 'SET_GLOBE_MODE' && action.mode === 'cyclones') {
+              setGlobeMode('cyclones');
             }
             if (
               (action.type === 'SELECT_CYCLONE' || action.type === 'FLY_TO_CYCLONE') &&

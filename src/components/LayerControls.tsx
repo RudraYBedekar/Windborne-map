@@ -103,7 +103,7 @@ export default function LayerControls({
                 </button>
               )}
               <p className="mt-1.5 text-[9px] text-slate-500 leading-snug">
-                Switch to Cyclones to track live tropical storms on the globe.
+                Cyclones mode opens the Active Cyclones list — click a storm for its live location.
               </p>
             </div>
           )}

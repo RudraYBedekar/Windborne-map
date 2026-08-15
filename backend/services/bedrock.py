@@ -51,7 +51,9 @@ After resolving, ask whether the user wants weather, balloons nearby, or a globe
 do NOT dump unrelated fleet statistics.
 
 ## Tropical cyclones / gridded forecasts
-Use list_tropical_cyclones, get_tropical_cyclone, get_cyclone_forecast for storm questions.
+For "cyclones list", "active hurricanes", "where are tropical cyclones", ALWAYS call list_tropical_cyclones.
+Never treat those phrases as city/place names for search_location.
+Use get_tropical_cyclone / get_cyclone_forecast for a specific storm ID or name.
 Use get_gridded_forecast_summary for regional grid statistics.
 Never invent cyclone position, intensity, landfall, track, cone, or grid values.
 If a field is null, say it is unavailable from WeatherMesh.
@@ -305,6 +307,85 @@ class BedrockChatService:
             "last_error": self.last_error,
         }
 
+    async def _cyclone_list_path(self, query: str) -> Optional[Dict[str, Any]]:
+        """Deterministic routing for cyclone-list questions — never geocode them as cities."""
+        if not ai_tools.look_like_cyclone_query(query):
+            return None
+        if not self.cyclone_service or not self.cyclones_enabled:
+            return {
+                "reply": "Tropical cyclone tools are unavailable right now.",
+                "provider": self.provider_name,
+                "model": self.model_id,
+                "model_display_name": self.display_name,
+                "is_fallback": False,
+                "sources": [],
+                "toolCalls": [],
+                "actions": [],
+                "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            }
+
+        tool_result = await self._execute_tool("list_tropical_cyclones", {})
+        if not tool_result.get("ok"):
+            tool_result = {
+                "ok": False,
+                "error": tool_result.get("error"),
+                "message": tool_result.get("message") or "Could not load tropical cyclones.",
+                "cyclones": [],
+            }
+
+        storms = tool_result.get("cyclones") or []
+        actions: List[Dict[str, Any]] = [{"type": "SET_GLOBE_MODE", "mode": "cyclones"}]
+        if not storms:
+            reply = (
+                "No active tropical cyclones were returned by WeatherMesh for this initialization. "
+                "Try again after the next upstream refresh (≈5 min)."
+            )
+        else:
+            lines = [
+                f"**Active tropical cyclones** ({tool_result.get('total', len(storms))} from WeatherMesh "
+                f"`{tool_result.get('model') or 'wm-6'}`):\n"
+            ]
+            for s in storms:
+                cid = s.get("tropical_cyclone_id")
+                name = s.get("storm_name") or cid
+                wind = s.get("max_wind_kt")
+                basins = ",".join(s.get("basins") or []) or "n/a"
+                wind_s = f"{wind} kt" if isinstance(wind, (int, float)) else "wind n/a"
+                lines.append(f"- **{name}** (`{cid}`) · basin `{basins}` · max wind `{wind_s}`")
+            strongest = tool_result.get("strongest")
+            if strongest and strongest.get("tropical_cyclone_id"):
+                actions.append(
+                    {"type": "SELECT_CYCLONE", "cycloneId": strongest["tropical_cyclone_id"]}
+                )
+                actions.append(
+                    {"type": "FLY_TO_CYCLONE", "cycloneId": strongest["tropical_cyclone_id"]}
+                )
+            lines.append(
+                "\nI switched the globe to **Cyclones** mode. "
+                "Click a storm on the map or in the Active Cyclones list to see its live position."
+            )
+            reply = "\n".join(lines)
+
+        return {
+            "reply": reply,
+            "provider": self.provider_name,
+            "model": self.model_id,
+            "model_display_name": self.display_name,
+            "is_fallback": False,
+            "sources": [
+                {
+                    "type": "tropical_cyclones",
+                    "provider": tool_result.get("provider") or "WindBorne WeatherMesh",
+                    "retrievedAt": tool_result.get("retrievedAt"),
+                }
+            ],
+            "toolCalls": [
+                {"name": "list_tropical_cyclones", "input": {}, "result": tool_result}
+            ],
+            "actions": actions,
+            "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        }
+
     async def _location_first_path(self, query: str) -> Optional[Dict[str, Any]]:
         """Deterministic routing for bare place names — never invent fleet facts."""
         if not ai_tools.look_like_bare_location(query):
@@ -415,6 +496,15 @@ class BedrockChatService:
         user_message = messages[-1].get("content", "") if messages else ""
         t0 = time.time()
         logger.info("[Vicky-AI] query=%s", user_message[:200])
+
+        # 0) Cyclone-list intent before bare-location geocoding
+        cyclone_routed = await self._cyclone_list_path(user_message)
+        if cyclone_routed:
+            logger.info(
+                "[Vicky-AI] intent=CYCLONE_LIST latency_ms=%s",
+                int((time.time() - t0) * 1000),
+            )
+            return cyclone_routed
 
         # 1) Deterministic location routing (fixes "fairfax" → random fleet rant)
         routed = await self._location_first_path(user_message)

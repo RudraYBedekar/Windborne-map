@@ -23,6 +23,7 @@ interface Props {
   point?: Record<string, unknown> | null;
   initializationTime?: string | null;
   onClose: () => void;
+  className?: string;
 }
 
 function fmt(v: unknown, suffix = ''): string {
@@ -37,11 +38,14 @@ export default function CycloneDetailPanel({
   point,
   initializationTime,
   onClose,
+  className = '',
 }: Props) {
   const name = cyclone.storm_name || cyclone.tropical_cyclone_id || 'Cyclone';
 
   return (
-    <div className="absolute top-3 left-3 z-30 w-[320px] max-w-[92vw] rounded-xl border border-slate-700 bg-slate-950/95 backdrop-blur-xl shadow-2xl overflow-hidden font-mono">
+    <div
+      className={`absolute top-3 left-3 z-30 w-[320px] max-w-[92vw] rounded-xl border border-slate-700 bg-slate-950/95 backdrop-blur-xl shadow-2xl overflow-hidden font-mono ${className}`}
+    >
       <div className="flex items-start justify-between gap-2 px-3 py-2.5 border-b border-slate-800 bg-slate-900/80">
         <div className="min-w-0">
           <div className="flex items-center gap-2 text-cyan-300 text-sm font-bold">

@@ -219,12 +219,36 @@ def find_balloon(balloons: List[Dict[str, Any]], balloon_id: str) -> Dict[str, A
     }
 
 
+def look_like_cyclone_query(text: str) -> bool:
+    """True for active-storm / cyclone-list style questions (not city geocoding)."""
+    q = (text or "").strip().lower()
+    if not q:
+        return False
+    keys = (
+        "cyclone",
+        "cyclones",
+        "hurricane",
+        "hurricanes",
+        "typhoon",
+        "typhoons",
+        "tropical storm",
+        "tropical cyclone",
+        "storm list",
+        "active storm",
+        "where is lala",
+        "atcf",
+    )
+    return any(k in q for k in keys)
+
+
 def look_like_bare_location(text: str) -> bool:
     """Heuristic: bare place name / short location query without weather/fleet keywords."""
     q = (text or "").strip()
     if not q or len(q) > 60:
         return False
     lower = q.lower()
+    if look_like_cyclone_query(lower):
+        return False
     blocked = [
         "balloon",
         "fleet",
@@ -239,6 +263,12 @@ def look_like_bare_location(text: str) -> bool:
         "terminator",
         "pressure",
         "humidity",
+        "cyclone",
+        "hurricane",
+        "typhoon",
+        "storm",
+        "gridded",
+        "list",
     ]
     if any(b in lower for b in blocked):
         return False
