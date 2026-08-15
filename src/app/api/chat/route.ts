@@ -9,7 +9,7 @@ export const dynamic = 'force-dynamic';
 export async function POST(request: NextRequest) {
     try {
         const body = await request.json();
-        const { messages, fleet_context, selected_balloon, weather_context } = body;
+        const { messages, fleet_context, selected_balloon, weather_context, map_bounds, selected_location, selected_cyclone_id } = body;
 
         if (!messages || !Array.isArray(messages) || messages.length === 0) {
             return NextResponse.json(
@@ -30,6 +30,9 @@ export async function POST(request: NextRequest) {
                     fleet_context,
                     selected_balloon,
                     weather_context,
+                    map_bounds,
+                    selected_location,
+                    selected_cyclone_id,
                 }),
                 cache: 'no-store',
             });

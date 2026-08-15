@@ -51,12 +51,14 @@ After resolving, ask whether the user wants weather, balloons nearby, or a globe
 do NOT dump unrelated fleet statistics.
 
 ## Tropical cyclones / gridded forecasts
-For "cyclones list", "active hurricanes", "where are tropical cyclones", ALWAYS call list_tropical_cyclones.
-Never treat those phrases as city/place names for search_location.
-Use get_tropical_cyclone / get_cyclone_forecast for a specific storm ID or name.
-Use get_gridded_forecast_summary for regional grid statistics.
-Never invent cyclone position, intensity, landfall, track, cone, or grid values.
-If a field is null, say it is unavailable from WeatherMesh.
+For "cyclones list", "active hurricanes", "which is strongest" → list_tropical_cyclones ONLY.
+For "Where is LALA expected to be in 24 hours?", "LALA +48h", "forecast position" → get_cyclone_forecast
+  with storm name or ATCF id and forecast_hour. Never invent lat/lon.
+For "top 5 snowiest in the US" / strongest winds / coldest / hottest → rank_forecast_locations
+  with named region (US, North America, Europe, Asia) or current_map_view.
+Never ask users for min/max lat/lon bounding boxes.
+Never invent cyclone position, intensity, snowfall, precip, wind, or temperature rankings.
+If a field is null / path missing, say WeatherMesh has not published it.
 Forecast Cone = ensemble-supported range of plausible positions — NOT a guaranteed impact region.
 
 ## Conceptual knowledge
@@ -70,13 +72,17 @@ When tools return numbers, quote those exact numbers — do not alter them.
 
 
 class BedrockChatService:
-    def __init__(self, weather_client=None, telemetry_loader=None, cyclone_service=None, gridded_service=None):
+    def __init__(self, weather_client=None, telemetry_loader=None, cyclone_service=None, gridded_service=None, rank_service=None):
         self.weather_client = weather_client
         self.telemetry_loader = telemetry_loader  # async callable -> list[balloon]
         self.cyclone_service = cyclone_service
         self.gridded_service = gridded_service
+        self.rank_service = rank_service
         self.client = None
         self.last_error: Optional[str] = None
+        self._map_bounds: Optional[Dict[str, Any]] = None
+        self._selected_location: Optional[Dict[str, Any]] = None
+        self._selected_cyclone_id: Optional[str] = None
         self._refresh_config()
         if self.enabled:
             self._init_client()
@@ -246,26 +252,33 @@ class BedrockChatService:
             else:
                 hour = int(tool_input.get("forecast_hour", 0))
                 payload = await self.cyclone_service.fetch_cyclones(include_details=True)
-                storm = self.cyclone_service.get_storm(payload, tool_input.get("cyclone_id", ""))
+                storm = self.cyclone_service.resolve_storm(
+                    payload, tool_input.get("cyclone_id", "")
+                ) or self.cyclone_service.get_storm(payload, tool_input.get("cyclone_id", ""))
                 if not storm:
-                    out = {"ok": False, "error": "NOT_FOUND"}
-                else:
-                    point = self.cyclone_service.point_at_hour(storm, hour)
                     out = {
-                        "ok": True,
-                        "cyclone_id": storm.get("tropical_cyclone_id"),
-                        "storm_name": storm.get("storm_name"),
-                        "forecast_hour": hour,
-                        "point": point,
-                        "has_cone": bool(storm.get("cone") and storm["cone"].get("geometry")),
-                        "landfall_count": len(storm.get("landfalls") or []),
-                        "cone_note": (
-                            "Forecast cone is the WeatherMesh ensemble-supported range of "
-                            "plausible cyclone positions — not a guaranteed impact region."
-                        ),
-                        "provider": payload.get("provider"),
-                        "model": payload.get("model"),
+                        "ok": False,
+                        "error": "NOT_FOUND",
+                        "message": f"No active cyclone matching `{tool_input.get('cyclone_id')}` in WeatherMesh.",
                     }
+                else:
+                    out = self.cyclone_service.forecast_position(storm, hour)
+                    out["initialization_time"] = payload.get("initialization_time")
+                    out["model"] = payload.get("model")
+                    out["from_cache"] = payload.get("from_cache")
+                    out["has_cone"] = bool(storm.get("cone") and storm["cone"].get("geometry"))
+        elif name == "rank_forecast_locations":
+            if not self.rank_service or not self.gridded_enabled:
+                out = {"ok": False, "error": "RANK_UNAVAILABLE"}
+            else:
+                out = await self.rank_service.rank_locations(
+                    metric=tool_input.get("metric", "precipitation"),
+                    region=tool_input.get("region"),
+                    forecast_window_hours=int(tool_input.get("forecast_window_hours") or 24),
+                    limit=int(tool_input.get("limit") or 5),
+                    map_bounds=self._map_bounds,
+                    selected_location=self._selected_location,
+                )
         elif name == "get_gridded_forecast_summary":
             if not self.gridded_service or not self.gridded_enabled:
                 out = {"ok": False, "error": "GRIDDED_UNAVAILABLE"}
@@ -307,9 +320,225 @@ class BedrockChatService:
             "last_error": self.last_error,
         }
 
+    async def _cyclone_forecast_path(self, query: str) -> Optional[Dict[str, Any]]:
+        """Deterministic single-storm forecast position (e.g. LALA +24h)."""
+        intent = ai_tools.parse_cyclone_forecast_intent(query)
+        if not intent:
+            return None
+        if not self.cyclone_service or not self.cyclones_enabled:
+            return {
+                "reply": "Tropical cyclone tools are unavailable right now.",
+                "provider": self.provider_name,
+                "model": self.model_id,
+                "model_display_name": self.display_name,
+                "is_fallback": False,
+                "sources": [],
+                "toolCalls": [],
+                "actions": [],
+                "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            }
+
+        name = intent["name_or_id"]
+        hour = int(intent["forecast_hour"])
+        if name == "__selected__":
+            sel = (self._selected_location or {}).get("cyclone_id") or (
+                self._selected_location or {}
+            ).get("cycloneId")
+            # Prefer explicit selected cyclone from chat context
+            sel = getattr(self, "_selected_cyclone_id", None) or sel
+            if not sel:
+                return {
+                    "reply": (
+                        "Which cyclone should I check? Name one (e.g. LALA) or select it on the globe first."
+                    ),
+                    "provider": self.provider_name,
+                    "model": self.model_id,
+                    "model_display_name": self.display_name,
+                    "is_fallback": False,
+                    "sources": [],
+                    "toolCalls": [],
+                    "actions": [{"type": "SET_GLOBE_MODE", "mode": "cyclones"}],
+                    "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+                }
+            name = str(sel)
+
+        tool_result = await self._execute_tool(
+            "get_cyclone_forecast",
+            {"cyclone_id": name, "forecast_hour": hour},
+        )
+        actions: List[Dict[str, Any]] = [{"type": "SET_GLOBE_MODE", "mode": "cyclones"}]
+
+        if not tool_result.get("ok"):
+            reply = tool_result.get("message") or (
+                f"WeatherMesh has not published a forecast position for **{name}** at +{hour}h."
+            )
+        else:
+            lat = tool_result.get("latitude")
+            lon = tool_result.get("longitude")
+            actual = tool_result.get("forecast_hour")
+            nearest = tool_result.get("nearest_used")
+            wind = tool_result.get("max_wind_kt")
+            mslp = tool_result.get("min_mslp_hpa")
+            sid = tool_result.get("cyclone_id")
+            sname = tool_result.get("storm_name") or name
+            hour_note = (
+                f"Nearest WeatherMesh path point is **+{actual}h** (requested +{hour}h)."
+                if nearest and actual is not None and int(actual) != hour
+                else f"Forecast hour **+{actual if actual is not None else hour}h**."
+            )
+            wind_s = f"{wind} kt" if isinstance(wind, (int, float)) else "unavailable"
+            mslp_s = f"{mslp} hPa" if isinstance(mslp, (int, float)) else "unavailable"
+            reply = (
+                f"**{sname}** (`{sid}`) — WeatherMesh forecast position\n\n"
+                f"- {hour_note}\n"
+                f"- Location: `{lat:.3f}°, {lon:.3f}°`\n"
+                f"- Valid: `{tool_result.get('valid_at') or 'unavailable'}`\n"
+                f"- Max wind: `{wind_s}`\n"
+                f"- Min MSLP: `{mslp_s}`\n"
+                f"- Init: `{tool_result.get('initialization_time') or 'unavailable'}`"
+            )
+            if sid:
+                actions.append({"type": "SELECT_CYCLONE", "cycloneId": sid})
+                actions.append({"type": "SET_CYCLONE_FORECAST_HOUR", "forecastHour": int(actual or hour)})
+            if isinstance(lat, (int, float)) and isinstance(lon, (int, float)):
+                actions.append(
+                    {
+                        "type": "FLY_TO_LOCATION",
+                        "latitude": float(lat),
+                        "longitude": float(lon),
+                        "name": f"{sname} +{actual or hour}h",
+                    }
+                )
+
+        return {
+            "reply": reply,
+            "provider": self.provider_name,
+            "model": self.model_id,
+            "model_display_name": self.display_name,
+            "is_fallback": False,
+            "sources": [
+                {
+                    "type": "tropical_cyclone_forecast",
+                    "provider": "WindBorne WeatherMesh",
+                    "retrievedAt": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+                }
+            ],
+            "toolCalls": [
+                {
+                    "name": "get_cyclone_forecast",
+                    "input": {"cyclone_id": name, "forecast_hour": hour},
+                    "result": tool_result,
+                }
+            ],
+            "actions": actions,
+            "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        }
+
+    async def _rank_forecast_path(self, query: str) -> Optional[Dict[str, Any]]:
+        from services.forecast_rank import parse_rank_intent
+
+        intent = parse_rank_intent(query)
+        if not intent:
+            return None
+        if not self.rank_service or not self.gridded_enabled:
+            return {
+                "reply": "Gridded forecast ranking is unavailable right now.",
+                "provider": self.provider_name,
+                "model": self.model_id,
+                "model_display_name": self.display_name,
+                "is_fallback": False,
+                "sources": [],
+                "toolCalls": [],
+                "actions": [],
+                "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            }
+
+        tool_input = {
+            "metric": intent["metric"],
+            "region": intent.get("region"),
+            "forecast_window_hours": intent.get("forecast_window_hours", 24),
+            "limit": intent.get("limit", 5),
+        }
+        tool_result = await self._execute_tool("rank_forecast_locations", tool_input)
+        actions: List[Dict[str, Any]] = []
+
+        if tool_result.get("ask_region") or tool_result.get("error") == "NEED_REGION":
+            reply = tool_result.get("message") or (
+                "Which region should I check: US, North America, Europe, or Asia?"
+            )
+        elif not tool_result.get("ok"):
+            reply = tool_result.get("message") or "Could not rank forecast locations from WeatherMesh."
+        else:
+            locs = tool_result.get("locations") or []
+            lines = [
+                f"**Top {len(locs)} {tool_result.get('label') or intent['metric']} locations** "
+                f"(WeatherMesh `{tool_result.get('variable')}` · +{tool_result.get('forecast_hour_used')}h):\n"
+            ]
+            for row in locs:
+                lines.append(
+                    f"{row.get('rank')}. **{row.get('location')}** — "
+                    f"`{row.get('value')} {row.get('units')}` "
+                    f"(`{row.get('latitude'):.2f}°, {row.get('longitude'):.2f}°`)"
+                )
+            if tool_result.get("limitation"):
+                lines.append(f"\n_{tool_result['limitation']}_")
+            if tool_result.get("region", {}).get("note"):
+                lines.append(f"\n_{tool_result['region']['note']}_")
+            lines.append(
+                f"\nValid: `{tool_result.get('valid_time')}` · "
+                f"Init: `{tool_result.get('initialization_time')}`"
+            )
+            reply = "\n".join(lines)
+            actions.append(
+                {
+                    "type": "SHOW_RANKED_LOCATIONS",
+                    "locations": [
+                        {
+                            "rank": r.get("rank"),
+                            "name": r.get("location"),
+                            "latitude": r.get("latitude"),
+                            "longitude": r.get("longitude"),
+                            "value": r.get("value"),
+                            "units": r.get("units"),
+                        }
+                        for r in locs
+                        if isinstance(r.get("latitude"), (int, float))
+                        and isinstance(r.get("longitude"), (int, float))
+                    ],
+                    "metric": intent["metric"],
+                }
+            )
+            if locs:
+                actions.append(
+                    {
+                        "type": "FLY_TO_LOCATION",
+                        "latitude": locs[0]["latitude"],
+                        "longitude": locs[0]["longitude"],
+                        "name": locs[0].get("location"),
+                    }
+                )
+
+        return {
+            "reply": reply,
+            "provider": self.provider_name,
+            "model": self.model_id,
+            "model_display_name": self.display_name,
+            "is_fallback": False,
+            "sources": [
+                {
+                    "type": "forecast_rank",
+                    "provider": "WindBorne WeatherMesh",
+                    "retrievedAt": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+                }
+            ],
+            "toolCalls": [{"name": "rank_forecast_locations", "input": tool_input, "result": tool_result}],
+            "actions": actions,
+            "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        }
+
     async def _cyclone_list_path(self, query: str) -> Optional[Dict[str, Any]]:
         """Deterministic routing for cyclone-list questions — never geocode them as cities."""
-        if not ai_tools.look_like_cyclone_query(query):
+        if not ai_tools.look_like_cyclone_list_query(query):
             return None
         if not self.cyclone_service or not self.cyclones_enabled:
             return {
@@ -491,13 +720,37 @@ class BedrockChatService:
         fleet_context: Optional[Dict[str, Any]] = None,
         selected_balloon: Optional[Dict[str, Any]] = None,
         weather_context: Optional[Dict[str, Any]] = None,
+        map_bounds: Optional[Dict[str, Any]] = None,
+        selected_location: Optional[Dict[str, Any]] = None,
+        selected_cyclone_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         self._refresh_config()
+        self._map_bounds = map_bounds
+        self._selected_location = selected_location
+        self._selected_cyclone_id = selected_cyclone_id
         user_message = messages[-1].get("content", "") if messages else ""
         t0 = time.time()
         logger.info("[Vicky-AI] query=%s", user_message[:200])
 
-        # 0) Cyclone-list intent before bare-location geocoding
+        # 0a) Single-storm forecast position before list routing
+        cyclone_fc = await self._cyclone_forecast_path(user_message)
+        if cyclone_fc:
+            logger.info(
+                "[Vicky-AI] intent=CYCLONE_FORECAST latency_ms=%s",
+                int((time.time() - t0) * 1000),
+            )
+            return cyclone_fc
+
+        # 0b) Regional ranking (snow/wind/precip/temp)
+        rank_routed = await self._rank_forecast_path(user_message)
+        if rank_routed:
+            logger.info(
+                "[Vicky-AI] intent=FORECAST_RANK latency_ms=%s",
+                int((time.time() - t0) * 1000),
+            )
+            return rank_routed
+
+        # 0c) Cyclone-list intent before bare-location geocoding
         cyclone_routed = await self._cyclone_list_path(user_message)
         if cyclone_routed:
             logger.info(
@@ -709,7 +962,7 @@ class BedrockChatService:
                         sources.append(
                             {
                                 "type": "tropical_cyclone",
-                                "provider": result.get("provider"),
+                                "provider": result.get("provider") or "WindBorne WeatherMesh",
                                 "retrievedAt": result.get("retrievedAt"),
                             }
                         )
@@ -719,14 +972,56 @@ class BedrockChatService:
                         )
                         if cid:
                             actions.append({"type": "SELECT_CYCLONE", "cycloneId": cid})
+                        if name == "get_cyclone_forecast":
+                            hour = result.get("forecast_hour")
+                            if hour is not None:
+                                actions.append(
+                                    {
+                                        "type": "SET_CYCLONE_FORECAST_HOUR",
+                                        "forecastHour": int(hour),
+                                    }
+                                )
+                            lat, lon = result.get("latitude"), result.get("longitude")
+                            if isinstance(lat, (int, float)) and isinstance(lon, (int, float)):
+                                actions.append(
+                                    {
+                                        "type": "FLY_TO_LOCATION",
+                                        "latitude": float(lat),
+                                        "longitude": float(lon),
+                                        "name": result.get("storm_name") or cid,
+                                    }
+                                )
+                            elif cid:
+                                actions.append({"type": "FLY_TO_CYCLONE", "cycloneId": cid})
+                        elif cid:
                             actions.append({"type": "FLY_TO_CYCLONE", "cycloneId": cid})
-                        if name == "get_cyclone_forecast" and result.get("forecast_hour") is not None:
-                            actions.append(
-                                {
-                                    "type": "SET_CYCLONE_FORECAST_HOUR",
-                                    "hour": int(result["forecast_hour"]),
-                                }
-                            )
+                    elif name == "rank_forecast_locations" and result.get("ok"):
+                        sources.append(
+                            {
+                                "type": "forecast_rank",
+                                "provider": result.get("provider"),
+                                "variable": result.get("variable"),
+                                "retrievedAt": result.get("retrievedAt"),
+                            }
+                        )
+                        locs = result.get("locations") or []
+                        actions.append(
+                            {
+                                "type": "SHOW_RANKED_LOCATIONS",
+                                "locations": [
+                                    {
+                                        "rank": r.get("rank"),
+                                        "name": r.get("location"),
+                                        "latitude": r.get("latitude"),
+                                        "longitude": r.get("longitude"),
+                                        "value": r.get("value"),
+                                        "units": r.get("units"),
+                                    }
+                                    for r in locs
+                                ],
+                                "metric": result.get("metric"),
+                            }
+                        )
                     elif name == "get_gridded_forecast_summary" and result.get("ok"):
                         sources.append(
                             {

@@ -258,7 +258,7 @@ def find_balloon(balloons: List[Dict[str, Any]], balloon_id: str) -> Dict[str, A
 
 
 def look_like_cyclone_query(text: str) -> bool:
-    """True for active-storm / cyclone-list style questions (not city geocoding)."""
+    """True for any tropical-cyclone related question (blocks bare geocode)."""
     q = (text or "").strip().lower()
     if not q:
         return False
@@ -273,10 +273,151 @@ def look_like_cyclone_query(text: str) -> bool:
         "tropical cyclone",
         "storm list",
         "active storm",
-        "where is lala",
         "atcf",
+        "lala",
+        "hernan",
+        "nangka",
     )
     return any(k in q for k in keys)
+
+
+def look_like_cyclone_list_query(text: str) -> bool:
+    """List / ranking of active storms — NOT a single-storm forecast position."""
+    q = (text or "").strip().lower()
+    if not q or not look_like_cyclone_query(q):
+        return False
+    # Forecast-position phrasing should not hit the list path
+    if parse_cyclone_forecast_intent(q):
+        return False
+    list_keys = (
+        "list",
+        "active",
+        "which cyclone",
+        "what cyclone",
+        "what tropical",
+        "strongest",
+        "how many cyclone",
+        "how many hurricane",
+        "storms are",
+        "cyclones are",
+        "hurricanes are",
+    )
+    return any(k in q for k in list_keys) or q in (
+        "cyclones",
+        "hurricanes",
+        "tropical cyclones",
+        "cyclones list",
+    )
+
+
+def parse_cyclone_forecast_intent(text: str) -> Optional[Dict[str, Any]]:
+    """
+    Parse 'Where is LALA expected to be in 24 hours?' → name + forecast_hour.
+    Returns None if not a single-storm forecast/position question.
+    """
+    import re
+
+    q = (text or "").strip()
+    if not q:
+        return None
+    lower = q.lower()
+
+    # Must look storm-related or contain a known-style name token
+    hour = None
+    m = re.search(r"\+(\d{1,3})\s*h\b", lower)
+    if m:
+        hour = int(m.group(1))
+    if hour is None:
+        m = re.search(r"\bin\s+(\d{1,3})\s*h(?:ou)?rs?\b", lower)
+        if m:
+            hour = int(m.group(1))
+    if hour is None:
+        m = re.search(r"\b(\d{1,3})\s*h(?:ou)?rs?\b", lower)
+        if m and any(k in lower for k in ("forecast", "expected", "will", "where", "+")):
+            hour = int(m.group(1))
+    if hour is None and "tomorrow" in lower:
+        hour = 24
+    if hour is None and re.search(
+        r"(forecast position|expected to be|where will|will .+ be)", lower
+    ):
+        hour = 24  # implied near-term forecast when no hour given
+    if hour is None and re.search(r"where is \w+", lower) and look_like_cyclone_query(lower):
+        # "Where is LALA?" → current (+0)
+        if not any(k in lower for k in ("expected", "will", "forecast", "tomorrow")):
+            hour = 0
+
+    if hour is None:
+        return None
+
+    # Extract name/id token
+    name = None
+    m = re.search(r"\b([A-Z]{2}\d{6})\b", q.upper())
+    if m:
+        name = m.group(1)
+    if not name:
+        m = re.search(
+            r"\b(?:cyclone|hurricane|typhoon|storm)\s+([A-Za-z]{3,})\b", q, re.I
+        )
+        if m:
+            name = m.group(1)
+    if not name:
+        m = re.search(
+            r"\b(lala|hernan|nangka|[A-Za-z]{3,})\b(?:\s*\+\d|\s+in\s+\d|\s+expected|\s+forecast|\s+be\b)?",
+            lower,
+        )
+        # Prefer explicit known storm words or capitalized tokens
+        caps = re.findall(r"\b([A-Z][A-Za-z]{2,})\b", q)
+        skip = {
+            "Where",
+            "What",
+            "Show",
+            "Will",
+            "WeatherMesh",
+            "Hours",
+            "Hour",
+            "Forecast",
+            "Position",
+            "Tropical",
+            "Cyclone",
+            "Hurricane",
+            "Typhoon",
+        }
+        caps = [c for c in caps if c not in skip]
+        if caps:
+            name = caps[0]
+        elif m and m.group(1) not in (
+            "where",
+            "will",
+            "this",
+            "the",
+            "show",
+            "what",
+            "cyclone",
+            "hurricane",
+            "expected",
+            "forecast",
+            "hours",
+            "hour",
+            "tomorrow",
+        ):
+            name = m.group(1)
+
+    # "Where will this cyclone be tomorrow?" → selected storm context
+    if not name and re.search(r"\bthis\s+(cyclone|hurricane|typhoon|storm)\b", lower):
+        name = "__selected__"
+
+    if not name:
+        return None
+    if name.lower() in ("cyclone", "hurricane", "typhoon", "storm", "tropical"):
+        return None
+
+    # Snap to supported hours when close
+    supported = (0, 12, 24, 48, 72, 120)
+    hour = int(hour)
+    if hour not in supported:
+        hour = min(supported, key=lambda h: abs(h - hour))
+
+    return {"name_or_id": name.strip(), "forecast_hour": hour}
 
 
 def look_like_bare_location(text: str) -> bool:
@@ -285,8 +426,6 @@ def look_like_bare_location(text: str) -> bool:
     if not q or len(q) > 60:
         return False
     lower = q.lower()
-    if look_like_cyclone_query(lower):
-        return False
     blocked = [
         "balloon",
         "fleet",
@@ -307,8 +446,15 @@ def look_like_bare_location(text: str) -> bool:
         "storm",
         "gridded",
         "list",
+        "snow",
+        "wind",
+        "hottest",
+        "coldest",
+        "top ",
     ]
     if any(b in lower for b in blocked):
+        return False
+    if look_like_cyclone_query(lower):
         return False
     # Single token or short multi-word place-like string
     words = [w for w in q.replace(",", " ").split() if w]
@@ -375,7 +521,10 @@ BEDROCK_TOOLS = [
     {
         "toolSpec": {
             "name": "list_tropical_cyclones",
-            "description": "List WeatherMesh-6 tropical cyclones for the latest initialization. Use for active storm questions. Never invent storms.",
+            "description": (
+                "List active WeatherMesh tropical cyclones. Use ONLY for list/ranking questions "
+                "(active storms, strongest cyclone). Do NOT use for 'where will LALA be in 24h'."
+            ),
             "inputSchema": {"json": {"type": "object", "properties": {}, "required": []}},
         }
     },
@@ -396,7 +545,11 @@ BEDROCK_TOOLS = [
     {
         "toolSpec": {
             "name": "get_cyclone_forecast",
-            "description": "Get cyclone position/metrics at a forecast hour (0,12,24,48,72,120).",
+            "description": (
+                "Get WeatherMesh forecast position for one cyclone at a forecast hour. "
+                "cyclone_id may be ATCF id OR storm name (e.g. LALA). Hours: 0,12,24,48,72,120. "
+                "Use for 'where will LALA be in 24 hours'. Never invent coordinates."
+            ),
             "inputSchema": {
                 "json": {
                     "type": "object",
@@ -412,15 +565,38 @@ BEDROCK_TOOLS = [
     },
     {
         "toolSpec": {
+            "name": "rank_forecast_locations",
+            "description": (
+                "Deterministic top-N WeatherMesh locations for snowfall, precipitation, wind_speed, "
+                "temperature_high, or temperature_low. Pass region as US|North America|Europe|Asia|"
+                "current_map_view — never ask users for raw bounding-box coordinates."
+            ),
+            "inputSchema": {
+                "json": {
+                    "type": "object",
+                    "properties": {
+                        "metric": {"type": "string"},
+                        "region": {"type": "string"},
+                        "forecast_window_hours": {"type": "integer"},
+                        "limit": {"type": "integer"},
+                    },
+                    "required": ["metric"],
+                    "additionalProperties": False,
+                }
+            },
+        }
+    },
+    {
+        "toolSpec": {
             "name": "get_gridded_forecast_summary",
-            "description": "Deterministic WeatherMesh gridded stats (min/max/mean) for a bbox. Never invent grid values.",
+            "description": "Deterministic WeatherMesh gridded stats (min/max/mean) for a bbox. Prefer rank_forecast_locations for 'top N' questions.",
             "inputSchema": {
                 "json": {
                     "type": "object",
                     "properties": {
                         "variable": {
                             "type": "string",
-                            "description": "temperature_2m|pressure_msl|precipitation|wind_speed",
+                            "description": "temperature_2m|pressure_msl|precipitation|wind_speed|snowfall_3h",
                         },
                         "bbox": {
                             "type": "string",
@@ -449,7 +625,7 @@ def tools_for_config(
     if not cyclones_enabled:
         deny |= {"list_tropical_cyclones", "get_tropical_cyclone", "get_cyclone_forecast"}
     if not gridded_enabled:
-        deny |= {"get_gridded_forecast_summary"}
+        deny |= {"get_gridded_forecast_summary", "rank_forecast_locations"}
     return [
         t
         for t in BEDROCK_TOOLS

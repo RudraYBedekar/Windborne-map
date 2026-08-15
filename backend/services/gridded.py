@@ -26,6 +26,7 @@ KNOWN_VARS = {
     "wind_u_10m": {"units": "m/s", "label": "Wind U"},
     "wind_v_10m": {"units": "m/s", "label": "Wind V"},
     "wind_speed_10m": {"units": "m/s", "label": "Wind speed"},
+    "snowfall_3h": {"units": "mm", "label": "3h snowfall"},
 }
 
 PRECIP_CANDIDATES = (
@@ -35,6 +36,12 @@ PRECIP_CANDIDATES = (
     "tp",
     "total_precipitation_3h",
     "precipitation_rate",
+)
+
+SNOW_CANDIDATES = (
+    "snowfall_3h",
+    "snowfall",
+    "snow",
 )
 
 FORECAST_HOURS = (0, 3, 6, 12, 24, 48, 72)
@@ -186,9 +193,11 @@ class GriddedForecastService:
                 return self.precip_variable
             # Prefer documented candidates until variables cache is warm
             return PRECIP_CANDIDATES[0]
+        if v in ("snowfall", "snow", "snowfall_3h"):
+            return "snowfall_3h"
         if v == "wind_speed" or v == "wind":
             return "wind_speed_10m"
-        if v not in KNOWN_VARS and v not in PRECIP_CANDIDATES:
+        if v not in KNOWN_VARS and v not in PRECIP_CANDIDATES and v not in SNOW_CANDIDATES:
             raise ValueError(f"Unsupported variable: {variable}")
         return v
 
@@ -434,6 +443,137 @@ class GriddedForecastService:
         arr = np.asarray(da.values, dtype=float)
         ds.close()
         return arr
+
+    def _netcdf_bytes_to_subset_coords(
+        self, content: bytes, west: float, south: float, east: float, north: float
+    ):
+        """Return (2D array, lat_1d, lon_1d) for ranking."""
+        import numpy as np
+        import xarray as xr
+
+        ds = xr.open_dataset(io.BytesIO(content))
+        data_vars = list(ds.data_vars)
+        if not data_vars:
+            ds.close()
+            raise RuntimeError("NetCDF contained no data variables")
+        da = ds[data_vars[0]]
+        while da.ndim > 2:
+            da = da.isel({da.dims[0]: 0})
+
+        lat_name = next((d for d in da.dims if "lat" in d.lower()), None)
+        lon_name = next((d for d in da.dims if "lon" in d.lower()), None)
+        if not lat_name or not lon_name:
+            lat_name = next((c for c in da.coords if "lat" in c.lower()), None)
+            lon_name = next((c for c in da.coords if "lon" in c.lower()), None)
+        if not lat_name or not lon_name:
+            ds.close()
+            raise RuntimeError("Could not identify lat/lon dimensions in NetCDF")
+
+        lat = da[lat_name]
+        lat_asc = bool(lat.values[0] < lat.values[-1])
+        if lat_asc:
+            da = da.sel({lat_name: slice(south, north), lon_name: slice(west, east)})
+        else:
+            da = da.sel({lat_name: slice(north, south), lon_name: slice(west, east)})
+
+        arr = np.asarray(da.values, dtype=float)
+        lats = np.asarray(da[lat_name].values, dtype=float)
+        lons = np.asarray(da[lon_name].values, dtype=float)
+        ds.close()
+        return arr, lats, lons
+
+    async def rank_extrema(
+        self,
+        variable: str,
+        bbox: str,
+        forecast_hour: int = 24,
+        limit: int = 5,
+        maximize: bool = True,
+    ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+        """Deterministic top-N grid extrema with spatial separation."""
+        import numpy as np
+
+        if not self.enabled:
+            raise PermissionError("Gridded forecasts disabled")
+        if not self._deps_ready():
+            raise RuntimeError("Missing Python deps: xarray, numpy, pillow")
+
+        west, south, east, north = parse_bbox(bbox)
+        var = self.resolve_variable(variable)
+        hour = int(forecast_hour)
+        if hour not in FORECAST_HOURS:
+            raise ValueError(f"forecast_hour must be one of {FORECAST_HOURS}")
+
+        # Load with coordinates
+        if var == "wind_speed_10m":
+            arr, meta = await self._load_subset(var, hour, west, south, east, north)
+            # Rebuild coords via a lightweight u download cache if possible — approximate mesh
+            # from bbox linspace when wind is derived (coords not returned by _load_subset).
+            h, w = np.asarray(arr).shape[:2]
+            lats = np.linspace(north, south, h)
+            lons = np.linspace(west, east, w)
+        else:
+            valid_time = self._valid_time_for_hour(hour)
+            cache_key = f"grid:{self.model}:{var}:{valid_time}"
+
+            async def fetcher():
+                content = await self._download_variable_bytes(var, valid_time)
+                return {"bytes": content, "valid_time": valid_time}
+
+            try:
+                raw, from_cache = await wb_fetch_gate.run(cache_key, fetcher)
+            except RateLimitedFetch as e:
+                stale = wb_fetch_gate.stale_get(cache_key)
+                if stale is None:
+                    raise RuntimeError(str(e)) from e
+                raw, from_cache = stale, True
+            arr, lats, lons = self._netcdf_bytes_to_subset_coords(
+                raw["bytes"], west, south, east, north
+            )
+            meta = {
+                "valid_time": raw.get("valid_time"),
+                "initialization_time": None,
+                "from_cache": from_cache,
+                "variable": var,
+            }
+
+        a = np.asarray(arr, dtype=float)
+        if a.ndim != 2:
+            a = np.squeeze(a)
+        if a.ndim != 2:
+            raise RuntimeError("Expected 2D grid for ranking")
+
+        # Coarsen for ranking stability / speed
+        step = max(1, min(a.shape[0], a.shape[1]) // 64)
+        work = a[::step, ::step]
+        lat_w = lats[::step] if lats.ndim == 1 else lats[::step, 0]
+        lon_w = lons[::step] if lons.ndim == 1 else lons[0, ::step]
+
+        flat = work.ravel()
+        finite = np.isfinite(flat)
+        if not np.any(finite):
+            raise RuntimeError("No finite values in region for ranking")
+
+        # Min separation ~2° to avoid clustered neighbors
+        min_sep = 2.0
+        order = np.argsort(flat)[::-1] if maximize else np.argsort(flat)
+        picked: List[Dict[str, Any]] = []
+        for idx in order:
+            if not finite[idx]:
+                continue
+            iy, ix = np.unravel_index(int(idx), work.shape)
+            lat = float(lat_w[iy]) if lat_w.ndim == 1 else float(lat_w[iy])
+            lon = float(lon_w[ix]) if lon_w.ndim == 1 else float(lon_w[ix])
+            val = float(work[iy, ix])
+            if any(
+                math.hypot(lat - p["latitude"], lon - p["longitude"]) < min_sep for p in picked
+            ):
+                continue
+            picked.append({"latitude": lat, "longitude": lon, "value": round(val, 3)})
+            if len(picked) >= limit:
+                break
+
+        return picked, meta
 
     def _array_to_png(self, arr, variable: str, resolution: int) -> bytes:
         import numpy as np

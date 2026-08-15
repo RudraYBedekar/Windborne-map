@@ -22,6 +22,7 @@ from services.openweather_tiles import OPENWEATHER_TILE_MAX_ZOOM, OpenWeatherTil
 from services.rate_limit import KeyedRateLimiter
 from services.wb_gate import wb_fetch_gate
 from services.windborne import WindBorneClient
+from services.forecast_rank import ForecastRankService
 
 # Single dotenv load path (no custom parsers)
 _BASE = Path(__file__).resolve().parent
@@ -53,6 +54,7 @@ wb_client = WindBorneClient()
 owm_tiles = OpenWeatherTileProxy()
 cyclone_service = TropicalCycloneService()
 gridded_service = GriddedForecastService()
+rank_service = ForecastRankService(gridded_service)
 chat_limiter = KeyedRateLimiter(max_per_minute=CHAT_RPM)
 weather_limiter = KeyedRateLimiter(max_per_minute=WEATHER_RPM)
 
@@ -167,6 +169,7 @@ bedrock_service = BedrockChatService(
     telemetry_loader=_load_treasure_telemetry,
     cyclone_service=cyclone_service,
     gridded_service=gridded_service,
+    rank_service=rank_service,
 )
 
 app = FastAPI(title="Windborne API Service", lifespan=lifespan)
@@ -217,6 +220,9 @@ class ChatRequest(BaseModel):
     fleet_context: Optional[Dict[str, Any]] = None
     selected_balloon: Optional[Dict[str, Any]] = None
     weather_context: Optional[Dict[str, Any]] = None
+    map_bounds: Optional[Dict[str, Any]] = None
+    selected_location: Optional[Dict[str, Any]] = None
+    selected_cyclone_id: Optional[str] = None
 
 
 @app.get("/")
@@ -266,6 +272,9 @@ async def chat_with_vicky(
         fleet_context=req.fleet_context,
         selected_balloon=req.selected_balloon,
         weather_context=req.weather_context,
+        map_bounds=req.map_bounds,
+        selected_location=req.selected_location,
+        selected_cyclone_id=req.selected_cyclone_id,
     )
 
 

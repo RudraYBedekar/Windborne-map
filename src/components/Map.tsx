@@ -43,6 +43,15 @@ interface MapComponentProps {
   meshBbox?: string;
   cyclonesEnabled?: boolean;
   griddedEnabled?: boolean;
+  rankedLocations?: Array<{
+    rank?: number;
+    name?: string;
+    latitude: number;
+    longitude: number;
+    value?: number;
+    units?: string;
+  }> | null;
+  onMapBoundsChange?: (bounds: { west: number; south: number; east: number; north: number }) => void;
 }
 
 const POIs = [
@@ -173,6 +182,8 @@ export default function MapComponent({
   meshBbox = '-130,20,-60,55',
   cyclonesEnabled = true,
   griddedEnabled = true,
+  rankedLocations = null,
+  onMapBoundsChange,
 }: MapComponentProps) {
   const mapRef = React.useRef<MapRef>(null);
   const isProgrammaticMove = React.useRef(false);
@@ -506,6 +517,73 @@ export default function MapComponent({
     ] as [[number, number], [number, number], [number, number], [number, number]];
   }, [meshBbox]);
 
+  // Report viewport bounds for Vicky ranking ("current map view")
+  React.useEffect(() => {
+    if (!onMapBoundsChange) return;
+    const map = mapRef.current?.getMap();
+    if (!map) return;
+    const emit = () => {
+      try {
+        const b = map.getBounds();
+        onMapBoundsChange({
+          west: b.getWest(),
+          south: b.getSouth(),
+          east: b.getEast(),
+          north: b.getNorth(),
+        });
+      } catch {
+        // ignore
+      }
+    };
+    emit();
+    map.on('moveend', emit);
+    return () => {
+      map.off('moveend', emit);
+    };
+  }, [onMapBoundsChange, basemap]);
+
+  const rankedGeoJson: FeatureCollection | null = React.useMemo(() => {
+    if (!rankedLocations?.length) return null;
+    return {
+      type: 'FeatureCollection',
+      features: rankedLocations.map((loc, i) => ({
+        type: 'Feature',
+        geometry: { type: 'Point', coordinates: [loc.longitude, loc.latitude] },
+        properties: {
+          id: `rank-${loc.rank ?? i + 1}`,
+          name: loc.name || `#${loc.rank ?? i + 1}`,
+          rank: loc.rank ?? i + 1,
+          value: loc.value,
+          units: loc.units,
+        },
+      })),
+    };
+  }, [rankedLocations]);
+
+  // Fit map to ranked forecast markers when Vicky returns SHOW_RANKED_LOCATIONS
+  React.useEffect(() => {
+    if (!rankedLocations?.length || !mapRef.current) return;
+    const lons = rankedLocations.map((l) => l.longitude);
+    const lats = rankedLocations.map((l) => l.latitude);
+    const west = Math.min(...lons);
+    const east = Math.max(...lons);
+    const south = Math.min(...lats);
+    const north = Math.max(...lats);
+    isProgrammaticMove.current = true;
+    mapRef.current.fitBounds(
+      [
+        [west, south],
+        [east, north],
+      ],
+      { padding: 60, maxZoom: 6, duration: 1200 }
+    );
+    mapRef.current.getMap().once('moveend', () => {
+      window.setTimeout(() => {
+        isProgrammaticMove.current = false;
+      }, 80);
+    });
+  }, [rankedLocations]);
+
   // Fly to selected cyclone position
   React.useEffect(() => {
     if (!selectedCycloneId || !cycloneGeoJson || !mapRef.current) return;
@@ -821,6 +899,37 @@ export default function MapComponent({
                         </Source>
                     );
                 })()}
+
+        {/* Ranked forecast location markers (from Vicky) */}
+        {rankedGeoJson && (
+          <Source id="ranked-forecast-points" type="geojson" data={rankedGeoJson}>
+            <Layer
+              id="ranked-points"
+              type="circle"
+              paint={{
+                'circle-radius': 8,
+                'circle-color': '#fbbf24',
+                'circle-stroke-width': 2,
+                'circle-stroke-color': '#ffffff',
+              }}
+            />
+            <Layer
+              id="ranked-labels"
+              type="symbol"
+              layout={{
+                'text-field': ['concat', '#', ['to-string', ['get', 'rank']], ' ', ['get', 'name']],
+                'text-size': 10,
+                'text-offset': [0, 1.2],
+                'text-anchor': 'top',
+              }}
+              paint={{
+                'text-color': '#fde68a',
+                'text-halo-color': '#020617',
+                'text-halo-width': 1.5,
+              }}
+            />
+          </Source>
+        )}
 
         {/* Tropical cyclone layers */}
         {globeMode === 'cyclones' && cycloneGeoJson && (

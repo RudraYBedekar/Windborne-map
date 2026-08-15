@@ -1,14 +1,13 @@
 # WindBorne Weather & Mission Globe
 
-Interactive **MapLibre 3D globe** for live **WindBorne WeatherMesh** forecasts, **tropical cyclone mission mode**, and **Vicky-AI** — an Amazon Bedrock co-pilot that answers only from grounded tools.
+Interactive **MapLibre** globe for live **WindBorne WeatherMesh** forecasts, **tropical cyclone mission mode**, and **Vicky-AI** — a grounded chat co-pilot that answers from verified tools, not invented numbers.
 
-Built for operators and reviewers who need **real storm data when it exists**, and **honest gaps when WeatherMesh has not published a track yet**.
+Built so operators see **real storm data when WeatherMesh publishes it**, and a clear gap when a track is not available yet.
 
 [![Next.js](https://img.shields.io/badge/Frontend-Next.js%2016-000000?logo=next.js&logoColor=white)](https://nextjs.org)
 [![FastAPI](https://img.shields.io/badge/Backend-FastAPI-009688?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com)
 [![MapLibre](https://img.shields.io/badge/Map-MapLibre%20GL-3388ff)](https://maplibre.org)
 [![WeatherMesh](https://img.shields.io/badge/Forecast-WeatherMesh%20wm--6-00bcd4)](https://windbornesystems.com)
-[![Bedrock](https://img.shields.io/badge/AI-Amazon%20Bedrock-FF9900?logo=amazon-aws&logoColor=white)](./AWS_BEDROCK_EC2_GUIDE.md)
 [![Python](https://img.shields.io/badge/Python-3.10+-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 
 ---
@@ -17,24 +16,44 @@ Built for operators and reviewers who need **real storm data when it exists**, a
 
 ![System architecture](./docs/architecture.png)
 
-| Layer | Responsibility |
+| Layer | What it does |
 |--------|----------------|
-| **Client** | Next.js 16 + React + MapLibre globe, cyclone list/detail, forecast scrub, Vicky chat |
-| **Edge proxies** | Next.js `/api/*` routes → FastAPI (no browser secrets for WeatherMesh / Bedrock) |
-| **API** | FastAPI services: weather, tropical cyclones, gridded PNG/summary, chat tools, rate limits |
-| **Upstream gate** | Shared WindBorne fetch gate (**default 300s**) + cache/stale so chat never blocks for minutes |
-| **External** | WeatherMesh (`wm-6`), Bedrock Converse, Nominatim, RainViewer, optional OpenWeather |
+| **Browser** | Next.js UI + MapLibre globe, cyclone list/detail, forecast scrub, Vicky chat |
+| **Next.js proxies** | `/api/*` → FastAPI so WeatherMesh / Bedrock secrets never reach the browser |
+| **FastAPI** | Weather, cyclones, gridded overlays, forecast ranking, chat tools, rate limits |
+| **Fetch gate** | Shared WindBorne gate (default **300s**) + cache/stale so chat does not block for minutes |
 
 ```mermaid
 flowchart LR
-  UI[Browser / MapLibre] --> NX[Next.js :3000]
-  NX --> API[FastAPI :8000]
-  API --> WB[WeatherMesh wm-6]
-  API --> BR[Amazon Bedrock]
+  UI[Browser / MapLibre] --> NX[Next.js]
+  NX --> API[FastAPI]
+  API --> WB[WeatherMesh]
+  API --> BR[Bedrock]
   API --> NOM[Nominatim]
   API --> RV[RainViewer]
-  API --> OM[Open-Meteo fallback]
 ```
+
+---
+
+## Services we use (and how)
+
+| Service | Role in this project |
+|---------|----------------------|
+| **WindBorne WeatherMesh (`wm-6`)** | Source of truth for point forecasts, tropical cyclone tracks/cones, and gridded fields (NetCDF → PNG / ranking). All operational weather numbers come from here. |
+| **Amazon Bedrock (Converse)** | Powers Vicky-AI chat. The model only explains tool results; it does not invent cyclone positions, winds, or ranked snowfall. |
+| **OpenStreetMap Nominatim** | Forward geocode (place → lat/lon) and reverse geocode (coords → region label) for chat and ranked locations. |
+| **MapLibre GL** | 3D globe, cyclone layers, gridded overlays, ranked markers, fly-to actions. |
+| **RainViewer** | Optional radar tile overlay on the map. |
+| **OpenWeather** | Optional cloud / temp / wind map tiles (rate-limited proxy). |
+| **Open-Meteo** | Labeled fallback only when WeatherMesh point weather is unavailable. |
+
+**Vicky tool routing (deterministic first):**
+
+1. Cyclone forecast questions → `get_cyclone_forecast` (resolve name → path hour → lat/lon/wind/pressure)
+2. Top-N snow / wind / precip / temp → `rank_forecast_locations` (named region or current map view; ranking in Python)
+3. Active storm list / strongest cyclone → `list_tropical_cyclones`
+4. Place names → Nominatim `search_location`
+5. Everything else → Bedrock with the same tools, still grounded
 
 ---
 
@@ -42,22 +61,23 @@ flowchart LR
 
 | Capability | Details |
 |------------|---------|
-| **3D mission globe** | MapLibre globe, multiple basemaps (roads / hybrid / sat / terrain / dark) |
-| **Tropical Cyclone Mode** | Active storm list, mean track, uncertainty cone, +0…+120h scrub, click → fly-to |
-| **Sparse-storm honesty** | If WeatherMesh returns empty path (e.g. early systems), show **genesis** + clear “track not published” note — never invent routes |
-| **WeatherMesh point forecast** | Temp, pressure, precip, wind; cached; Open-Meteo only as labeled fallback |
-| **Gridded overlays** | Temp / wind / pressure / precip PNG for a capped bbox (`/api/weather/grid`) |
-| **Vicky-AI** | Bedrock tool use: location, weather, `list_tropical_cyclones`, storm forecast, gridded summary |
-| **Trial-safe WB usage** | Upstream spacing ≤ **1 fetch / 5 min** (`WB_MIN_REQUEST_INTERVAL_SEC=300`) |
-| **Optional fleet UI** | Treasure balloons **off by default** (public feed not operationally accurate) |
+| **3D mission globe** | MapLibre globe, multiple basemaps |
+| **Tropical Cyclone Mode** | Active list, mean track, cone, +0…+120h scrub, click → fly-to |
+| **Sparse-storm honesty** | Empty path → genesis + “track not published” — never invent routes |
+| **Cyclone forecast chat** | “Where is LALA in 24h?” → WeatherMesh path point + optional fly-to |
+| **Regional ranking** | Top-N snowfall / precip / wind / temp for US, NA, Europe, Asia, or current map view |
+| **WeatherMesh point forecast** | Temp, pressure, precip, wind; Open-Meteo only as labeled fallback |
+| **Gridded overlays** | Temp / wind / pressure / precip PNG for a capped bbox |
+| **Trial-safe WB usage** | ≤ **1 upstream fetch / 5 min** (`WB_MIN_REQUEST_INTERVAL_SEC=300`) |
+| **Optional fleet UI** | Treasure balloons off by default |
 
-**Out of scope (by design):** WindBorne does **not** provide avalanche alerts or news headlines. Region labels use reverse geocoding only.
+**Out of scope:** Avalanche alerts and news headlines are not provided by WindBorne. Region labels use reverse geocoding only.
 
 ---
 
 ## Quick start
 
-**Prerequisites:** Node.js 18+, Python 3.10+, WindBorne API key. AWS credentials or EC2 IAM role for Vicky-AI.
+**Prerequisites:** Node.js 18+, Python 3.10+, WindBorne API key. Bedrock credentials (or local IAM) if you want Vicky-AI.
 
 ### 1. Backend
 
@@ -68,7 +88,7 @@ python -m venv venv
 pip install -r requirements.txt
 copy .env.example .env
 # Set WB_API_KEY=...
-# Optional: AWS_REGION, BEDROCK_AGENT_MODEL
+# Optional for Vicky: AWS_REGION, BEDROCK_AGENT_MODEL (+ AWS credentials)
 python -m uvicorn main:app --reload --host 127.0.0.1 --port 8000
 ```
 
@@ -102,16 +122,16 @@ curl "http://127.0.0.1:8000/api/cyclones?include_details=true"
 | `WB_MIN_REQUEST_INTERVAL_SEC` | `backend/.env` | Min seconds between upstream WB fetches (**300**) |
 | `WB_STALE_CACHE_TTL_SEC` | `backend/.env` | Serve last-good cyclone/grid data while gated (**1800**) |
 | `CYCLONES_ENABLED` | `backend/.env` | Tropical cyclone APIs / AI tools |
-| `GRIDDED_FORECASTS_ENABLED` | `backend/.env` | Gridded PNG / summary |
-| `AWS_REGION` | `backend/.env` | Bedrock region |
+| `GRIDDED_FORECASTS_ENABLED` | `backend/.env` | Gridded PNG / summary / ranking |
+| `AWS_REGION` | `backend/.env` | Bedrock region (for Vicky-AI) |
 | `BEDROCK_AGENT_MODEL` | `backend/.env` | Converse model / inference profile |
-| `AWS_ACCESS_KEY_ID` / `SECRET` | `backend/.env` | Leave empty on EC2 with IAM role |
+| `AWS_ACCESS_KEY_ID` / `SECRET` | `backend/.env` | Optional; omit if using default AWS credential chain |
 | `BALLOONS_ENABLED` | `backend/.env` | AI fleet tools (default **false**) |
 | `ALLOWED_ORIGINS` | `backend/.env` | CORS allow-list (no `*`) |
 | `CHAT_RPM_LIMIT` / `WEATHER_RPM_LIMIT` | `backend/.env` | Per-IP rate limits |
 | `API_KEY` | `backend/.env` | Optional `X-API-Key` for chat |
-| `OPENWEATHER_KEY` / `OPENWEATHER_RPM_LIMIT` | `backend/.env` | Optional tile proxy (default **50**/min) |
-| `NEXT_PUBLIC_SHOW_BALLOONS` | `.env.local` | Show balloon markers globally |
+| `OPENWEATHER_KEY` / `OPENWEATHER_RPM_LIMIT` | `backend/.env` | Optional tile proxy |
+| `NEXT_PUBLIC_SHOW_BALLOONS` | `.env.local` | Show balloon markers |
 | `FASTAPI_BACKEND_URL` | `.env.local` | Next proxy target (default `http://127.0.0.1:8000`) |
 
 ---
@@ -131,7 +151,7 @@ curl "http://127.0.0.1:8000/api/cyclones?include_details=true"
 | `GET` | `/api/openweather/tiles/...` | Rate-limited OWM tiles |
 | `GET` | `/windborne` | Treasure telemetry (optional) |
 
-More checks: [`API_CHECK.md`](./API_CHECK.md) · Bedrock on EC2: [`AWS_BEDROCK_EC2_GUIDE.md`](./AWS_BEDROCK_EC2_GUIDE.md)
+More checks: [`API_CHECK.md`](./API_CHECK.md)
 
 ---
 
@@ -139,21 +159,22 @@ More checks: [`API_CHECK.md`](./API_CHECK.md) · Bedrock on EC2: [`AWS_BEDROCK_E
 
 ```text
 backend/
-  main.py                 FastAPI routes + lifespan cyclone warm cache
+  main.py                 FastAPI routes + cyclone warm cache
   services/
-    cyclones.py           Tropical cyclone normalize / GeoJSON
-    gridded.py            NetCDF → PNG / summary
+    cyclones.py           Tropical cyclone normalize / GeoJSON / forecast position
+    forecast_rank.py      Named-region / viewport top-N ranking
+    gridded.py            NetCDF → PNG / summary / extrema
     wb_gate.py            5-min upstream gate + stale cache
-    bedrock.py            Vicky Converse + tool routing
-    ai_tools.py           Deterministic tools (weather, geocode, cyclones)
+    bedrock.py            Vicky Converse + deterministic routing
+    ai_tools.py           Tools (weather, geocode, cyclones, rank)
     windborne.py          Point forecast client
-  tests/                  Pytest grounding + cyclone/gate tests
+  tests/                  Pytest grounding + routing tests
 src/
   app/                    Next.js pages + /api proxies
   components/             Map, CycloneList/Detail, VickyChat, Layers
   services/               Frontend cyclone/weather clients
 docs/
-  architecture.png        System architecture diagram (HD)
+  architecture.png        System overview diagram
 ```
 
 ---
@@ -161,28 +182,10 @@ docs/
 ## Design principles
 
 1. **Grounded AI** — operational numbers come from tools; the model does not invent tracks or intensity.  
-2. **Trial-safe upstream** — WeatherMesh fetches are gated and cached; chat returns stale/cached data instead of sleeping for minutes.  
-3. **Honest sparse data** — empty cyclone paths surface as genesis + explicit “track not published” messaging.  
+2. **Trial-safe upstream** — WeatherMesh fetches are gated and cached; chat prefers stale/cached over long waits.  
+3. **Honest sparse data** — empty cyclone paths surface as genesis + explicit “track not published”.  
 4. **Server-side secrets** — API keys stay on FastAPI; the browser talks to Next proxies.  
-5. **Demo-ready, not hardened production** — RPM limits and CORS exist; auth is optional (`API_KEY`).
-
----
-
-## Deploy (EC2 + PM2)
-
-```bash
-cd ~/Windborne-map   # or your clone path
-git pull origin main
-cd backend && source venv/bin/activate && pip install -r requirements.txt
-cd .. && npm install && npm run build
-pm2 restart windborne-api windborne-web
-```
-
-Confirm:
-
-```bash
-curl -s http://127.0.0.1:8000/api/weather/mesh-status | python3 -m json.tool
-```
+5. **Demo-ready** — RPM limits and CORS exist; auth is optional (`API_KEY`).
 
 ---
 

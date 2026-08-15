@@ -254,34 +254,136 @@ class TropicalCycloneService:
                 return storm
         return None
 
-    def point_at_hour(self, storm: Dict[str, Any], forecast_hour: int) -> Optional[Dict[str, Any]]:
+    def resolve_storm(self, payload: Dict[str, Any], name_or_id: str) -> Optional[Dict[str, Any]]:
+        """Resolve ATCF id or storm name (e.g. LALA, CP012026)."""
+        q = (name_or_id or "").strip()
+        if not q:
+            return None
+        by_id = self.get_storm(payload, q)
+        if by_id:
+            return by_id
+        q_up = q.upper()
+        storms = payload.get("tropical_cyclones") or {}
+        if not isinstance(storms, dict):
+            return None
+        # Exact name match first
+        for storm in storms.values():
+            if not isinstance(storm, dict):
+                continue
+            name = str(storm.get("storm_name") or "").strip().upper()
+            if name and name == q_up:
+                return storm
+        # Prefix / contains (avoid tiny tokens)
+        if len(q_up) >= 3:
+            for storm in storms.values():
+                if not isinstance(storm, dict):
+                    continue
+                name = str(storm.get("storm_name") or "").strip().upper()
+                if name and (q_up in name or name in q_up):
+                    return storm
+        return None
+
+    def point_at_hour(
+        self,
+        storm: Dict[str, Any],
+        forecast_hour: int,
+        *,
+        allow_genesis_fallback: bool = True,
+    ) -> Optional[Dict[str, Any]]:
         path = storm.get("path") or []
         if path:
             exact = [p for p in path if p.get("forecast_hour") == forecast_hour]
             if exact:
-                return exact[0]
+                out = dict(exact[0])
+                out["requested_forecast_hour"] = forecast_hour
+                out["actual_forecast_hour"] = exact[0].get("forecast_hour")
+                out["nearest_used"] = False
+                out["position_source"] = "path"
+                return out
             ranked = sorted(
                 (p for p in path if isinstance(p.get("forecast_hour"), int)),
                 key=lambda p: abs(int(p["forecast_hour"]) - forecast_hour),
             )
             if ranked:
-                return ranked[0]
+                out = dict(ranked[0])
+                out["requested_forecast_hour"] = forecast_hour
+                out["actual_forecast_hour"] = ranked[0].get("forecast_hour")
+                out["nearest_used"] = True
+                out["position_source"] = "path"
+                return out
 
-        # Early / sparse storms: WeatherMesh may only publish genesis (no mean track yet)
-        gen = storm.get("genesis") or {}
-        if isinstance(gen.get("longitude"), (int, float)) and isinstance(gen.get("latitude"), (int, float)):
-            return {
-                "valid_at": storm.get("start_time"),
-                "forecast_hour": None,
-                "latitude": gen.get("latitude"),
-                "longitude": gen.get("longitude"),
-                "max_wind_kt": storm.get("max_wind_kt"),
-                "min_mslp_hpa": storm.get("min_mslp_hpa"),
-                "storm_type": None,
-                "position_source": "genesis",
-                "track_status": "Track not yet published by WeatherMesh for this storm.",
-            }
+        # Genesis only for "current"/+0 style lookups — never as a fake +24h track point
+        if allow_genesis_fallback and int(forecast_hour) == 0:
+            gen = storm.get("genesis") or {}
+            if isinstance(gen.get("longitude"), (int, float)) and isinstance(gen.get("latitude"), (int, float)):
+                return {
+                    "valid_at": storm.get("start_time"),
+                    "forecast_hour": None,
+                    "requested_forecast_hour": 0,
+                    "actual_forecast_hour": None,
+                    "nearest_used": False,
+                    "latitude": gen.get("latitude"),
+                    "longitude": gen.get("longitude"),
+                    "max_wind_kt": storm.get("max_wind_kt"),
+                    "min_mslp_hpa": storm.get("min_mslp_hpa"),
+                    "storm_type": None,
+                    "position_source": "genesis",
+                    "track_status": "Track not yet published by WeatherMesh for this storm.",
+                }
         return None
+
+    def forecast_position(
+        self, storm: Dict[str, Any], forecast_hour: int
+    ) -> Dict[str, Any]:
+        """Strict forecast lookup for chat: never invent coords; genesis ≠ future hour."""
+        path = storm.get("path") or []
+        name = storm.get("storm_name") or storm.get("tropical_cyclone_id")
+        cid = storm.get("tropical_cyclone_id")
+        if not path:
+            return {
+                "ok": False,
+                "error": "NO_FORECAST_PATH",
+                "message": (
+                    f"WeatherMesh has not published a forecast position for {name} "
+                    f"at +{int(forecast_hour)}h."
+                ),
+                "cyclone_id": cid,
+                "storm_name": storm.get("storm_name"),
+                "requested_forecast_hour": int(forecast_hour),
+                "path_points": 0,
+            }
+        pt = self.point_at_hour(storm, int(forecast_hour), allow_genesis_fallback=False)
+        if not pt or not isinstance(pt.get("latitude"), (int, float)) or not isinstance(
+            pt.get("longitude"), (int, float)
+        ):
+            return {
+                "ok": False,
+                "error": "NO_FORECAST_POINT",
+                "message": (
+                    f"WeatherMesh has not published a forecast position for {name} "
+                    f"at +{int(forecast_hour)}h."
+                ),
+                "cyclone_id": cid,
+                "storm_name": storm.get("storm_name"),
+                "requested_forecast_hour": int(forecast_hour),
+                "path_points": len(path),
+            }
+        return {
+            "ok": True,
+            "cyclone_id": cid,
+            "storm_name": storm.get("storm_name"),
+            "requested_forecast_hour": int(forecast_hour),
+            "forecast_hour": pt.get("actual_forecast_hour", pt.get("forecast_hour")),
+            "nearest_used": bool(pt.get("nearest_used")),
+            "latitude": pt.get("latitude"),
+            "longitude": pt.get("longitude"),
+            "valid_at": pt.get("valid_at"),
+            "max_wind_kt": pt.get("max_wind_kt"),
+            "min_mslp_hpa": pt.get("min_mslp_hpa"),
+            "storm_type": pt.get("storm_type"),
+            "path_points": len(path),
+            "provider": "WindBorne WeatherMesh",
+        }
 
     def to_geojson(
         self,

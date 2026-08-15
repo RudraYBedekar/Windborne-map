@@ -45,6 +45,9 @@ interface VickyChatProps {
     isOpen: boolean;
     onToggle: () => void;
     onAction?: (action: any) => void;
+    mapBounds?: { west: number; south: number; east: number; north: number } | null;
+    selectedLocation?: { lat: number; lon: number; name?: string } | null;
+    selectedCycloneId?: string | null;
 }
 
 export default function VickyChat({
@@ -54,6 +57,9 @@ export default function VickyChat({
     isOpen,
     onToggle,
     onAction,
+    mapBounds = null,
+    selectedLocation = null,
+    selectedCycloneId = null,
 }: VickyChatProps) {
     const [aiStatus, setAiStatus] = useState<AiStatus | null>(null);
 
@@ -149,6 +155,15 @@ export default function VickyChat({
                     fleet_context: fleetContext,
                     selected_balloon: selectedBalloonContext,
                     weather_context: weatherContext,
+                    map_bounds: mapBounds || undefined,
+                    selected_location: selectedLocation
+                        ? {
+                              lat: selectedLocation.lat,
+                              lon: selectedLocation.lon,
+                              name: selectedLocation.name,
+                          }
+                        : undefined,
+                    selected_cyclone_id: selectedCycloneId || undefined,
                 }),
             });
 

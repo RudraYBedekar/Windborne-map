@@ -84,6 +84,22 @@ export default function Home() {
   const [meshForecastHour, setMeshForecastHour] = useState(0);
   const [meshImageUrl, setMeshImageUrl] = useState<string | null>(null);
   const [meshHint, setMeshHint] = useState<string | null>(null);
+  const [mapBounds, setMapBounds] = useState<{
+    west: number;
+    south: number;
+    east: number;
+    north: number;
+  } | null>(null);
+  const [rankedLocations, setRankedLocations] = useState<
+    Array<{
+      rank?: number;
+      name?: string;
+      latitude: number;
+      longitude: number;
+      value?: number;
+      units?: string;
+    }>
+  >([]);
 
   useEffect(() => {
     const now = Date.now();
@@ -455,18 +471,24 @@ export default function Home() {
           weather={currentWeather}
           isOpen={isChatOpen}
           onToggle={() => setIsChatOpen((prev) => !prev)}
+          mapBounds={mapBounds}
+          selectedLocation={selectedLocation}
+          selectedCycloneId={selectedCycloneId}
           onAction={(action) => {
             if (!action || typeof action !== 'object') return;
             if (action.type === 'FLY_TO_LOCATION' && action.latitude != null && action.longitude != null) {
+              const lat = Number(action.latitude);
+              const lon = Number(action.longitude);
+              if (!Number.isFinite(lat) || !Number.isFinite(lon)) return;
+              if (lat < -90 || lat > 90 || lon < -180 || lon > 180) return;
               setSelectedLocation({
-                lat: Number(action.latitude),
-                lon: Number(action.longitude),
+                lat,
+                lon,
                 name:
                   action.name ||
-                  `Location (${Number(action.latitude).toFixed(2)}°, ${Number(action.longitude).toFixed(2)}°)`,
+                  `Location (${lat.toFixed(2)}°, ${lon.toFixed(2)}°)`,
               });
               setSelectedId(null);
-              setSelectedCycloneId(null);
               setIsTrackingCamera(false);
               setAutoRotate(false);
             }
@@ -482,9 +504,31 @@ export default function Home() {
             ) {
               selectCyclone(String(action.cycloneId));
             }
-            if (action.type === 'SET_CYCLONE_FORECAST_HOUR' && action.forecastHour != null) {
-              setGlobeMode('cyclones');
-              setCycloneForecastHour(Number(action.forecastHour));
+            if (action.type === 'SET_CYCLONE_FORECAST_HOUR') {
+              const h = Number(action.forecastHour ?? action.hour);
+              if (Number.isFinite(h)) {
+                setGlobeMode('cyclones');
+                setCycloneForecastHour(h);
+              }
+            }
+            if (action.type === 'SHOW_RANKED_LOCATIONS' && Array.isArray(action.locations)) {
+              const cleaned = action.locations
+                .map((loc: any) => ({
+                  rank: loc.rank,
+                  name: loc.name,
+                  latitude: Number(loc.latitude),
+                  longitude: Number(loc.longitude),
+                  value: loc.value,
+                  units: loc.units,
+                }))
+                .filter(
+                  (loc: { latitude: number; longitude: number }) =>
+                    Number.isFinite(loc.latitude) &&
+                    Number.isFinite(loc.longitude) &&
+                    loc.latitude >= -90 &&
+                    loc.latitude <= 90
+                );
+              setRankedLocations(cleaned);
             }
           }}
         />
@@ -604,6 +648,8 @@ export default function Home() {
             meshBbox={DEFAULT_MESH_BBOX}
             cyclonesEnabled={cyclonesEnabled}
             griddedEnabled={griddedEnabled}
+            rankedLocations={rankedLocations}
+            onMapBoundsChange={setMapBounds}
           />
         </div>
       </div>
