@@ -8,5 +8,7 @@ pytest
 numpy
 xarray
 netCDF4
+h5netcdf
+h5py
 pillow
 

@@ -113,6 +113,7 @@ class GriddedForecastService:
         try:
             import numpy  # noqa: F401
             import xarray  # noqa: F401
+            import h5netcdf  # noqa: F401
             from PIL import Image  # noqa: F401
 
             return True
@@ -409,13 +410,32 @@ class GriddedForecastService:
             raise RuntimeError(f"Gridded forecast failed ({resp.status_code})")
         return resp.content
 
+    def _open_netcdf_bytes(self, content: bytes):
+        """Open WeatherMesh NetCDF bytes with available xarray engines."""
+        import xarray as xr
+
+        last_err: Optional[Exception] = None
+        for engine in ("h5netcdf", "netcdf4", None):
+            try:
+                kwargs = {"engine": engine} if engine else {}
+                return xr.open_dataset(io.BytesIO(content), **kwargs)
+            except Exception as e:
+                last_err = e
+                continue
+        msg = str(last_err or "Could not open NetCDF")
+        if "h5netcdf" in msg.lower() or "backends" in msg.lower():
+            raise RuntimeError(
+                "WeatherMesh NetCDF needs the `h5netcdf` package. "
+                "Install backend deps: pip install h5netcdf h5py netCDF4"
+            ) from last_err
+        raise RuntimeError(msg) from last_err
+
     def _netcdf_bytes_to_subset(
         self, content: bytes, west: float, south: float, east: float, north: float
     ):
         import numpy as np
-        import xarray as xr
 
-        ds = xr.open_dataset(io.BytesIO(content))
+        ds = self._open_netcdf_bytes(content)
         data_vars = list(ds.data_vars)
         if not data_vars:
             ds.close()
@@ -449,9 +469,8 @@ class GriddedForecastService:
     ):
         """Return (2D array, lat_1d, lon_1d) for ranking."""
         import numpy as np
-        import xarray as xr
 
-        ds = xr.open_dataset(io.BytesIO(content))
+        ds = self._open_netcdf_bytes(content)
         data_vars = list(ds.data_vars)
         if not data_vars:
             ds.close()
