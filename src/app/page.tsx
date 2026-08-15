@@ -8,7 +8,6 @@ import CycloneDetailPanel, { CycloneDetail } from '@/components/CycloneDetailPan
 import TimelineControls from '@/components/TimelineControls';
 import ForecastHourControls from '@/components/ForecastHourControls';
 import MapComponent from '@/components/Map';
-import WeatherEffects from '@/components/WeatherEffects';
 import VickyChat from '@/components/VickyChat';
 import {
   Balloon,
@@ -344,8 +343,6 @@ export default function Home() {
       />
 
       <div className="flex-1 relative flex h-[calc(100vh-3.5rem)] w-full overflow-hidden">
-        <WeatherEffects weather={currentWeather} />
-
         {selectedLocation && !selectedBalloon && !selectedCyclone && (
           <CityWeatherPanel
             cityName={selectedLocation.name}

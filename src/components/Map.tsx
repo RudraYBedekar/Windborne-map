@@ -56,11 +56,11 @@ const POIs = [
 ];
 
 const DEFAULT_WEATHER: Record<WeatherLayerId, boolean> = {
-  radar: true,
+  radar: false,
   clouds: false,
   temp: false,
   wind: false,
-  terminator: true,
+  terminator: false,
 };
 
 const BALLOON_HIT_LAYERS = ['balloon-hit', 'balloon-points', 'balloon-points-halo', 'balloon-pulsing'];

@@ -216,7 +216,7 @@ export default function Navbar({
                 {onToggleChat && (
                     <button
                         onClick={onToggleChat}
-                        title="Vicky-AI Amazon Bedrock Co-Pilot"
+                        title="Vicky-AI Mission Copilot"
                         className={cn(
                             "flex items-center gap-1.5 px-2.5 py-1.5 rounded-md text-xs font-bold font-mono transition-all border",
                             isChatOpen

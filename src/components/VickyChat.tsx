@@ -56,11 +56,6 @@ export default function VickyChat({
     onAction,
 }: VickyChatProps) {
     const [aiStatus, setAiStatus] = useState<AiStatus | null>(null);
-    const displayModel =
-        aiStatus?.AI_MODEL_DISPLAY_NAME ||
-        aiStatus?.model_display_name ||
-        'Amazon Bedrock';
-    const displayProvider = aiStatus?.AI_PROVIDER || aiStatus?.provider || 'Amazon Bedrock';
 
     const [messages, setMessages] = useState<ChatMessage[]>([]);
     const [input, setInput] = useState('');
@@ -69,7 +64,6 @@ export default function VickyChat({
     const messagesEndRef = useRef<HTMLDivElement>(null);
     const welcomeSeeded = useRef(false);
 
-    // Load model branding from backend (single source of truth)
     useEffect(() => {
         let cancelled = false;
         fetch('/api/chat', { cache: 'no-store' })
@@ -78,44 +72,29 @@ export default function VickyChat({
                 if (!cancelled) setAiStatus(data);
             })
             .catch(() => {
-                if (!cancelled) {
-                    setAiStatus({
-                        AI_PROVIDER: 'Amazon Bedrock',
-                        AI_MODEL_DISPLAY_NAME: 'Unavailable',
-                        bedrock_ready: false,
-                    });
-                }
+                if (!cancelled) setAiStatus({ bedrock_ready: false });
             });
         return () => {
             cancelled = true;
         };
     }, []);
 
-    // Seed welcome after status known — no Nemotron / hardcoded model strings
     useEffect(() => {
         if (welcomeSeeded.current || !aiStatus) return;
         welcomeSeeded.current = true;
-        const modelLabel =
-            aiStatus.AI_MODEL_DISPLAY_NAME ||
-            aiStatus.model_display_name ||
-            'Amazon Bedrock';
         setMessages([
             {
                 id: 'welcome-msg',
                 role: 'assistant',
                 content:
-                    `👋 **Vicky-AI** — WindBorne Mission Operations Copilot.\n\n` +
-                    `Powered by **${modelLabel}** on Amazon Bedrock.\n\n` +
-                    `I only state operational facts from live tools (WeatherMesh, geocoding, telemetry APIs). ` +
-                    `Balloon markers are currently hidden because the public Treasure feed is not operationally accurate.\n\n` +
-                    `Try: *weather in Fairfax*, *what is a solar terminator?*, or ask about atmospheric concepts.`,
+                    `**Vicky-AI** — WindBorne Mission Operations Copilot.\n\n` +
+                    `I answer from live tools only (WeatherMesh weather, tropical cyclones, location search). ` +
+                    `I will not invent storm positions or forecast numbers.\n\n` +
+                    `Try: *Where are the active tropical cyclones?*, *weather in Fairfax*, or *forecast for LALA at +24h*.`,
                 timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-                provider: aiStatus.AI_PROVIDER || 'Amazon Bedrock',
-                modelDisplayName: modelLabel,
             },
         ]);
     }, [aiStatus]);
-
     useEffect(() => {
         if (isOpen && !isMinimized) {
             messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -181,8 +160,6 @@ export default function VickyChat({
                 role: 'assistant',
                 content: data.reply || 'I could not form a grounded answer.',
                 timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-                provider: data.provider || displayProvider,
-                modelDisplayName: data.model_display_name || displayModel,
                 isFallback: Boolean(data.is_fallback),
                 aiUnavailable: Boolean(data.ai_unavailable),
                 sources: data.sources || [],
@@ -200,7 +177,7 @@ export default function VickyChat({
                     id: `bot-err-${Date.now()}`,
                     role: 'assistant',
                     content:
-                        '⚠️ **AI service unavailable.** I will not invent fleet or weather numbers. Please check that FastAPI and Bedrock credentials are configured.',
+                        '⚠️ **AI service unavailable.** I will not invent fleet or weather numbers. Please check that the API backend is running.',
                     timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
                     aiUnavailable: true,
                 },
@@ -217,8 +194,6 @@ export default function VickyChat({
                 role: 'assistant',
                 content: '🧹 Chat cleared. Ask a grounded weather, location, or concept question.',
                 timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-                provider: displayProvider,
-                modelDisplayName: displayModel,
             },
         ]);
     };
@@ -251,9 +226,6 @@ export default function VickyChat({
                             <span className="font-bold text-xs md:text-sm tracking-wider text-slate-100 flex items-center gap-1">
                                 Vicky-AI
                                 <Sparkles className="w-3 h-3 text-cyan-400 inline" />
-                            </span>
-                            <span className="text-[9px] uppercase px-1.5 py-0.5 rounded bg-cyan-950 border border-cyan-700 text-cyan-300 font-semibold max-w-[160px] truncate">
-                                {displayModel}
                             </span>
                         </div>
                     </div>
@@ -289,7 +261,7 @@ export default function VickyChat({
                     onClick={() => setIsMinimized(false)}
                     className="flex-1 px-3 flex items-center justify-between text-xs text-cyan-300/90 cursor-pointer hover:bg-slate-900/50"
                 >
-                    <span className="truncate">Vicky-AI · {displayModel}</span>
+                    <span className="truncate">Vicky-AI · grounded tools</span>
                     <Radio className="w-3.5 h-3.5 text-cyan-400 animate-pulse shrink-0" />
                 </div>
             ) : (
@@ -297,9 +269,8 @@ export default function VickyChat({
                     <div className="px-3 py-1.5 bg-slate-900/60 border-b border-slate-800/80 flex items-center justify-between text-[10px] text-slate-400">
                         <div className="truncate">
                             <span className="text-cyan-400 font-bold">GROUNDED</span>
-                            <span className="ml-2">{displayProvider}</span>
+                            <span className="ml-2">WeatherMesh tools only</span>
                         </div>
-                        <span className="text-slate-500 shrink-0">Balloons UI: off</span>
                     </div>
 
                     <div className="flex-1 p-3 overflow-y-auto space-y-3 text-xs">
@@ -341,17 +312,11 @@ export default function VickyChat({
                                         })}
                                     </div>
 
-                                    {!isUser && (
+                                    {!isUser && (m.aiUnavailable || weatherSource || m.sources?.some((s) => s.type === 'fleet_telemetry')) && (
                                         <div className="mt-2 pt-1 border-t border-slate-800 text-[8px] text-slate-500 flex flex-col gap-0.5">
-                                            <div className="flex items-center justify-between gap-2">
-                                                <span>
-                                                    {m.modelDisplayName || displayModel}
-                                                    {m.provider ? ` · ${m.provider}` : ''}
-                                                </span>
-                                                {m.aiUnavailable && (
-                                                    <span className="text-amber-500">AI unavailable</span>
-                                                )}
-                                            </div>
+                                            {m.aiUnavailable && (
+                                                <span className="text-amber-500">AI unavailable</span>
+                                            )}
                                             {weatherSource && (
                                                 <span>
                                                     Weather:{' '}
