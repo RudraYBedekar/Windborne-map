@@ -8,8 +8,11 @@ from pathlib import Path
 from typing import List, Dict, Any, Optional
 from pydantic import BaseModel
 
+from fastapi.responses import Response
+
 from services.windborne import WindBorneClient
 from services.bedrock import BedrockChatService
+from services.openweather_tiles import OpenWeatherTileProxy, OPENWEATHER_TILE_MAX_ZOOM
 
 try:
     from dotenv import load_dotenv
@@ -49,6 +52,7 @@ WINDBORNE_TOKEN = os.getenv("WB_API_KEY") or os.getenv("WINDBORNE_TOKEN") or os.
 
 app = FastAPI(title="Windborne API Service")
 wb_client = WindBorneClient()
+owm_tiles = OpenWeatherTileProxy()
 
 
 async def fetch_url(client: httpx.AsyncClient, url: str) -> Optional[Any]:
@@ -179,8 +183,46 @@ async def chat_with_vicky(req: ChatRequest):
         weather_context=req.weather_context
     )
 
-@app.get("/api/weather")
+@app.get("/api/openweather/status")
+async def openweather_status():
+    """OpenWeatherMap tile proxy readiness and RPM budget."""
+    return owm_tiles.status()
 
+
+@app.get("/api/openweather/tiles/{layer}/{z}/{x}/{y}.png")
+@app.get("/api/openweather/tiles/{layer}/{z}/{x}/{y}")
+async def openweather_tile(layer: str, z: int, x: int, y: int):
+    """
+    Rate-limited OpenWeatherMap raster tiles (default 50 RPM).
+    Keeps the API key server-side and caches tiles briefly.
+    """
+    try:
+        body, content_type = await owm_tiles.fetch_tile(layer, z, x, y)
+        return Response(
+            content=body,
+            media_type=content_type,
+            headers={
+                "Cache-Control": "public, max-age=300",
+                "X-OWM-RPM-Limit": str(owm_tiles.rpm_limit),
+                "X-OWM-Max-Zoom": str(OPENWEATHER_TILE_MAX_ZOOM),
+            },
+        )
+    except PermissionError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except RuntimeError as e:
+        raise HTTPException(status_code=429, detail=str(e))
+    except httpx.HTTPStatusError as e:
+        raise HTTPException(
+            status_code=e.response.status_code,
+            detail=f"OpenWeatherMap tile error: {e.response.status_code}",
+        )
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"OpenWeatherMap proxy failed: {e}")
+
+
+@app.get("/api/weather")
 async def get_weather(lat: float, lon: float):
     """
     Fetch weather forecast for given coordinates using WindBorne WeatherMesh.

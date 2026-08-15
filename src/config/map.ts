@@ -4,16 +4,26 @@ export type WeatherLayerId = 'radar' | 'clouds' | 'temp' | 'wind' | 'terminator'
 
 const mapTilerKey = process.env.NEXT_PUBLIC_MAPTILER_KEY?.trim() || '';
 const openWeatherKey = process.env.NEXT_PUBLIC_OPENWEATHER_KEY?.trim() || '';
+const openWeatherEnabledFlag = process.env.NEXT_PUBLIC_OPENWEATHER_ENABLED?.trim().toLowerCase();
 const googleMapsKey = process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY?.trim() || '';
+
+/** OpenWeather overlays: public key OR explicit enable (key stays on FastAPI proxy). */
+const hasOpenWeather =
+  openWeatherKey.length > 0 ||
+  openWeatherEnabledFlag === 'true' ||
+  openWeatherEnabledFlag === '1';
 
 export const mapKeys = {
   mapTiler: mapTilerKey,
   openWeather: openWeatherKey,
   googleMaps: googleMapsKey,
   hasMapTiler: mapTilerKey.length > 0,
-  hasOpenWeather: openWeatherKey.length > 0,
+  hasOpenWeather,
   hasGoogleMaps: googleMapsKey.length > 0,
 };
+
+/** Stay under OpenWeather free/app RPM by overscaling low-z tiles */
+export const OPENWEATHER_TILE_MAX_ZOOM = 6;
 
 /** Google Earth–like sky / atmosphere for globe projection (MapLibre setSky) */
 export const EARTH_SKY = {
@@ -108,12 +118,10 @@ export const WEATHER_LAYER_OPTIONS: {
   { id: 'terminator', label: 'Day/Night' },
 ];
 
-/** OpenWeatherMap raster tile URL (needs NEXT_PUBLIC_OPENWEATHER_KEY) */
-export function getOpenWeatherTileUrl(layer: Exclude<WeatherLayerId, 'radar'>): string | null {
+/** Rate-limited OpenWeatherMap tiles via Next → FastAPI proxy (no key in the browser URL). */
+export function getOpenWeatherTileUrl(layer: Exclude<WeatherLayerId, 'radar' | 'terminator'>): string | null {
   if (!mapKeys.hasOpenWeather) return null;
-  const layerPath =
-    layer === 'clouds' ? 'clouds_new' : layer === 'temp' ? 'temp_new' : 'wind_new';
-  return `https://tile.openweathermap.org/map/${layerPath}/{z}/{x}/{y}.png?appid=${openWeatherKey}`;
+  return `/api/openweather/${layer}/{z}/{x}/{y}.png`;
 }
 
 /** MapTiler or public Terrarium DEM source — enables true 3D terrain elevation mesh */

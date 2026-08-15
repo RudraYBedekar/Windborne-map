@@ -138,6 +138,11 @@ export default function LayerControls({
                 Live Radar • {radarAgeLabel}
               </p>
             )}
+            {mapKeys.hasOpenWeather && (
+              <p className="mt-2 text-[9px] text-slate-500 leading-snug">
+                Clouds / Temp / Wind: one layer at a time · OpenWeather capped at 50 req/min
+              </p>
+            )}
           </div>
         </div>
       )}

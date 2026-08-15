@@ -13,28 +13,29 @@ import {
   WeatherLayerId,
   getBasemapStyle,
   getOpenWeatherTileUrl,
+  OPENWEATHER_TILE_MAX_ZOOM,
 } from '@/config/map';
 import LayerControls from '@/components/LayerControls';
 import type { FeatureCollection, Feature } from 'geojson';
 
 interface MapComponentProps {
-  balloons: Balloon[];
-  selectedId: string | null;
-  onSelectBalloon: (id: string | null) => void;
+    balloons: Balloon[];
+    selectedId: string | null;
+    onSelectBalloon: (id: string | null) => void;
   selectedLocation?: { lat: number; lon: number; name: string } | null;
   onSelectLocation?: (loc: { lat: number; lon: number; name: string } | null) => void;
-  autoRotate?: boolean;
+    autoRotate?: boolean;
   scrubTime?: number;
   trackSelected?: boolean;
   onStopTracking?: () => void;
 }
 
 const POIs = [
-  {
-    id: 'poi-norfolk',
+    {
+        id: 'poi-norfolk',
     name: 'Norfolk Launch Site',
-    lat: 36.8508,
-    lon: -76.2859,
+        lat: 36.8508,
+        lon: -76.2859,
     desc: 'Strategic high-altitude payload launch facility.',
   },
 ];
@@ -70,9 +71,9 @@ function setupMapAssets(map: MaplibreMap) {
     }
 
     if (map.hasImage('balloon-icon')) map.removeImage('balloon-icon');
-    const img = new Image();
+                        const img = new Image();
     img.src = '/balloon.svg?v=3';
-    img.onload = () => {
+                        img.onload = () => {
       try {
         if (map.getStyle() && !map.hasImage('balloon-icon')) map.addImage('balloon-icon', img);
       } catch {
@@ -81,45 +82,45 @@ function setupMapAssets(map: MaplibreMap) {
     };
 
     if (map.getStyle() && !map.hasImage('pulsing-dot')) {
-      const size = 150;
-      const pulsingDot = {
-        width: size,
-        height: size,
-        data: new Uint8ClampedArray(size * size * 4),
-        context: null as CanvasRenderingContext2D | null,
+                    const size = 150;
+                    const pulsingDot = {
+                        width: size,
+                        height: size,
+                        data: new Uint8ClampedArray(size * size * 4),
+                        context: null as CanvasRenderingContext2D | null,
         onAdd() {
-          const canvas = document.createElement('canvas');
-          canvas.width = this.width;
-          canvas.height = this.height;
-          this.context = canvas.getContext('2d');
-        },
+                            const canvas = document.createElement('canvas');
+                            canvas.width = this.width;
+                            canvas.height = this.height;
+                            this.context = canvas.getContext('2d');
+                        },
         render() {
-          const duration = 1500;
-          const t = (performance.now() % duration) / duration;
-          const context = this.context;
-          if (!context) return false;
+                            const duration = 1500;
+                            const t = (performance.now() % duration) / duration;
+                            const context = this.context;
+                            if (!context) return false;
 
-          const radius = (size / 2) * 0.3;
-          const outerRadius = (size / 2) * 0.7 * t + radius;
-          const alpha = 1 - t;
+                            const radius = (size / 2) * 0.3;
+                            const outerRadius = (size / 2) * 0.7 * t + radius;
+                            const alpha = 1 - t;
 
-          context.clearRect(0, 0, this.width, this.height);
-          context.beginPath();
-          context.arc(this.width / 2, this.height / 2, outerRadius, 0, Math.PI * 2);
+                            context.clearRect(0, 0, this.width, this.height);
+                            context.beginPath();
+                            context.arc(this.width / 2, this.height / 2, outerRadius, 0, Math.PI * 2);
           context.fillStyle = `rgba(6, 182, 212, ${alpha})`;
-          context.fill();
+                            context.fill();
 
-          context.beginPath();
-          context.arc(this.width / 2, this.height / 2, radius, 0, Math.PI * 2);
+                            context.beginPath();
+                            context.arc(this.width / 2, this.height / 2, radius, 0, Math.PI * 2);
           context.fillStyle = 'rgba(6, 182, 212, 0.9)';
-          context.strokeStyle = 'white';
-          context.lineWidth = 2;
-          context.fill();
-          context.stroke();
+                            context.strokeStyle = 'white';
+                            context.lineWidth = 2;
+                            context.fill();
+                            context.stroke();
 
-          this.data = context.getImageData(0, 0, this.width, this.height).data;
-          map.triggerRepaint();
-          return true;
+                            this.data = context.getImageData(0, 0, this.width, this.height).data;
+                            map.triggerRepaint();
+                            return true;
         },
       };
       try {
@@ -217,7 +218,16 @@ export default function MapComponent({
   }, [weatherLayers.radar, refreshRadar]);
 
   const toggleWeather = (id: WeatherLayerId) => {
-    setWeatherLayers((prev) => ({ ...prev, [id]: !prev[id] }));
+    setWeatherLayers((prev) => {
+      const next = { ...prev, [id]: !prev[id] };
+      // Only one OpenWeather raster at a time — keeps RPM under the 50/min budget
+      if (next[id] && (id === 'clouds' || id === 'temp' || id === 'wind')) {
+        next.clouds = id === 'clouds';
+        next.temp = id === 'temp';
+        next.wind = id === 'wind';
+      }
+      return next;
+    });
   };
 
   // Globe auto-rotation
@@ -555,7 +565,7 @@ export default function MapComponent({
         )}
 
         {weatherLayers.clouds && cloudTiles && (
-          <Source id="weather-clouds" type="raster" tiles={[cloudTiles]} tileSize={256} minzoom={0} maxzoom={12}>
+          <Source id="weather-clouds" type="raster" tiles={[cloudTiles]} tileSize={256} minzoom={0} maxzoom={OPENWEATHER_TILE_MAX_ZOOM}>
             <Layer
               id="weather-clouds-layer"
               type="raster"
@@ -565,7 +575,7 @@ export default function MapComponent({
         )}
 
         {weatherLayers.temp && tempTiles && (
-          <Source id="weather-temp" type="raster" tiles={[tempTiles]} tileSize={256} minzoom={0} maxzoom={12}>
+          <Source id="weather-temp" type="raster" tiles={[tempTiles]} tileSize={256} minzoom={0} maxzoom={OPENWEATHER_TILE_MAX_ZOOM}>
             <Layer
               id="weather-temp-layer"
               type="raster"
@@ -575,7 +585,7 @@ export default function MapComponent({
         )}
 
         {weatherLayers.wind && windTiles && (
-          <Source id="weather-wind" type="raster" tiles={[windTiles]} tileSize={256} minzoom={0} maxzoom={12}>
+          <Source id="weather-wind" type="raster" tiles={[windTiles]} tileSize={256} minzoom={0} maxzoom={OPENWEATHER_TILE_MAX_ZOOM}>
             <Layer
               id="weather-wind-layer"
               type="raster"
@@ -585,34 +595,34 @@ export default function MapComponent({
         )}
 
         {/* POI Launch Site Layers */}
-        <Source id="pois" type="geojson" data={poiGeoJson}>
-          <Layer
-            id="pois-layer"
-            type="symbol"
-            layout={{
-              'text-field': ['get', 'name'],
-              'text-variable-anchor': ['top', 'bottom', 'left', 'right'],
-              'text-radial-offset': 0.5,
+                <Source id="pois" type="geojson" data={poiGeoJson}>
+                    <Layer
+                        id="pois-layer"
+                        type="symbol"
+                        layout={{
+                            'text-field': ['get', 'name'],
+                            'text-variable-anchor': ['top', 'bottom', 'left', 'right'],
+                            'text-radial-offset': 0.5,
               'text-size': 11,
-              'text-transform': 'uppercase',
-            }}
-            paint={{
+                            'text-transform': 'uppercase',
+                        }}
+                        paint={{
               'text-color': '#38bdf8',
               'text-halo-color': '#020409',
               'text-halo-width': 2,
             }}
           />
-          <Layer
-            id="pois-circle"
-            type="circle"
-            paint={{
+                    <Layer
+                        id="pois-circle"
+                        type="circle"
+                        paint={{
               'circle-radius': 5,
               'circle-color': '#38bdf8',
               'circle-stroke-width': 1.5,
               'circle-stroke-color': '#ffffff',
-            }}
-          />
-        </Source>
+                        }}
+                    />
+                </Source>
 
         {/* Selected City Location Marker */}
         {selectedLocationGeoJson && (
@@ -643,49 +653,49 @@ export default function MapComponent({
             const visibleCount = Math.max(2, Math.floor(targetPath.length * pathProgress));
             const partialPath = targetPath.slice(0, visibleCount);
 
-            const pathGeoJson: FeatureCollection = {
-              type: 'FeatureCollection',
+                    const pathGeoJson: FeatureCollection = {
+                        type: 'FeatureCollection',
               features: [
                 {
-                  type: 'Feature',
-                  geometry: {
-                    type: 'LineString',
+                            type: 'Feature',
+                            geometry: {
+                                type: 'LineString',
                     coordinates: partialPath.map((p) => [p.lon, p.lat]),
                   },
                   properties: {},
-                },
+                            },
               ],
-            };
+                    };
 
-            return (
-              <Source id="selected-path" type="geojson" data={pathGeoJson}>
-                <Layer
-                  id="selected-path-glow"
-                  type="line"
+                    return (
+                        <Source id="selected-path" type="geojson" data={pathGeoJson}>
+                            <Layer
+                                id="selected-path-glow"
+                                type="line"
                   layout={{ 'line-join': 'round', 'line-cap': 'round' }}
-                  paint={{
+                                paint={{
                     'line-color': '#06b6d4',
-                    'line-width': 4,
+                                    'line-width': 4,
                     'line-opacity': 0.85,
                     'line-blur': 2,
-                  }}
-                />
-                <Layer
-                  id="selected-path-line"
-                  type="line"
+                                }}
+                            />
+                            <Layer
+                                id="selected-path-line"
+                                type="line"
                   layout={{ 'line-join': 'round', 'line-cap': 'round' }}
-                  paint={{
-                    'line-color': '#ffffff',
-                    'line-width': 2,
-                    'line-opacity': 1,
-                  }}
-                />
-              </Source>
-            );
-          })()}
+                                paint={{
+                                    'line-color': '#ffffff',
+                                    'line-width': 2,
+                                    'line-opacity': 1,
+                                }}
+                            />
+                        </Source>
+                    );
+                })()}
 
         {/* Active Balloon Scatter Vectors */}
-        <Source id="points" type="geojson" data={pointsGeoJson}>
+                <Source id="points" type="geojson" data={pointsGeoJson}>
           {/* Large invisible hit target — makes balloons easy to click */}
           <Layer
             id="balloon-hit"
@@ -696,42 +706,42 @@ export default function MapComponent({
               'circle-opacity': 0.01,
             }}
           />
-          <Layer
-            id="balloon-pulsing"
-            type="symbol"
-            layout={{
-              'icon-image': 'pulsing-dot',
-              'icon-allow-overlap': true,
+                    <Layer
+                        id="balloon-pulsing"
+                        type="symbol"
+                        layout={{
+                            'icon-image': 'pulsing-dot',
+                            'icon-allow-overlap': true,
               'icon-ignore-placement': true,
               'icon-pitch-alignment': 'viewport',
-            }}
-          />
-          <Layer
-            id="balloon-points-halo"
-            type="circle"
-            paint={{
+                        }}
+                    />
+                    <Layer
+                        id="balloon-points-halo"
+                        type="circle"
+                        paint={{
               'circle-radius': 14,
-              'circle-color': ['get', 'color'],
+                            'circle-color': ['get', 'color'],
               'circle-opacity': 0.35,
               'circle-stroke-width': 1.5,
               'circle-stroke-color': '#ffffff',
               'circle-stroke-opacity': 0.7,
             }}
           />
-          <Layer
-            id="balloon-points"
-            type="symbol"
-            layout={{
-              'icon-image': 'balloon-icon',
+                    <Layer
+                        id="balloon-points"
+                        type="symbol"
+                        layout={{
+                            'icon-image': 'balloon-icon',
               'icon-size': 0.75,
-              'icon-allow-overlap': true,
+                            'icon-allow-overlap': true,
               'icon-ignore-placement': true,
               'icon-anchor': 'bottom',
               'icon-pitch-alignment': 'viewport',
-            }}
-          />
-        </Source>
-      </Map>
-    </div>
-  );
+                        }}
+                    />
+                </Source>
+            </Map>
+        </div>
+    );
 }
