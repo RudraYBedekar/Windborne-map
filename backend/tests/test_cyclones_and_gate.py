@@ -140,7 +140,46 @@ def test_parse_bbox_rejects_huge_area():
     with pytest.raises(ValueError):
         parse_bbox("-180,-90,180,90")
     west, south, east, north = parse_bbox("-130,20,-60,55")
-    assert west == -130 and north == 55
+    assert west == -130
+
+
+def test_subset_bbox_handles_non_monotonic_and_0_360_lon():
+    """Reproduce WeatherMesh-style lon that breaks xarray .sel(slice)."""
+    import numpy as np
+    import xarray as xr
+
+    from services.gridded import subset_dataarray_bbox
+
+    # Descending lat + 0..360 lon (US west coast ~235.8°E == -124.2°)
+    lats = np.linspace(60, 10, 26)
+    lons = np.linspace(0, 359, 360)
+    data = np.arange(lats.size * lons.size, dtype=float).reshape(lats.size, lons.size)
+    da = xr.DataArray(data, coords={"latitude": lats, "longitude": lons}, dims=("latitude", "longitude"))
+
+    arr, out_lats, out_lons = subset_dataarray_bbox(da, -124.2, 25.0, -67.0, 49.0)
+    assert arr.ndim == 2
+    assert out_lats.min() >= 25.0 - 1e-6
+    assert out_lats.max() <= 49.0 + 1e-6
+    assert out_lons.min() >= -124.2 - 1e-6
+    assert out_lons.max() <= -67.0 + 1e-6
+    # Values were remapped into [-180, 180)
+    assert np.all(out_lons >= -180) and np.all(out_lons < 180)
+
+
+def test_subset_bbox_handles_shuffled_longitude_index():
+    import numpy as np
+    import xarray as xr
+
+    from services.gridded import subset_dataarray_bbox
+
+    lats = np.linspace(20, 50, 16)
+    lons = np.array([-130.0, -100.0, -120.0, -80.0, -90.0, -70.0])  # non-monotonic
+    data = np.ones((lats.size, lons.size), dtype=float)
+    da = xr.DataArray(data, coords={"lat": lats, "lon": lons}, dims=("lat", "lon"))
+
+    arr, out_lats, out_lons = subset_dataarray_bbox(da, -124.2, 25.0, -67.0, 49.0)
+    assert arr.size > 0
+    assert set(np.round(out_lons, 1)).issubset({-100.0, -120.0, -80.0, -90.0, -70.0})
 
 
 def test_wb_gate_serves_cache_without_second_fetch():

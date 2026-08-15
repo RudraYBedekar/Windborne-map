@@ -67,6 +67,59 @@ def parse_bbox(bbox: str) -> Tuple[float, float, float, float]:
     return west, south, east, north
 
 
+def _normalize_lon_to_180(lon):
+    """Map longitudes into [-180, 180) for bbox compares."""
+    import numpy as np
+
+    arr = np.asarray(lon, dtype=float)
+    return ((arr + 180.0) % 360.0) - 180.0
+
+
+def _find_lat_lon_names(da) -> Tuple[str, str]:
+    lat_name = next((d for d in da.dims if "lat" in d.lower()), None)
+    lon_name = next((d for d in da.dims if "lon" in d.lower()), None)
+    if not lat_name or not lon_name:
+        lat_name = next((c for c in da.coords if "lat" in c.lower()), None)
+        lon_name = next((c for c in da.coords if "lon" in c.lower()), None)
+    if not lat_name or not lon_name:
+        raise RuntimeError("Could not identify lat/lon dimensions in NetCDF")
+    return lat_name, lon_name
+
+
+def subset_dataarray_bbox(da, west: float, south: float, east: float, north: float):
+    """Subset a 2D lat/lon DataArray without requiring monotonic indexes.
+
+    WeatherMesh lon can be 0..360 or unsorted; ``.sel(slice(...))`` then fails with
+    "Cannot get left slice bound for non-monotonic index". Boolean masking is safe.
+    """
+    import numpy as np
+
+    while getattr(da, "ndim", 0) > 2:
+        da = da.isel({da.dims[0]: 0})
+
+    lat_name, lon_name = _find_lat_lon_names(da)
+    lat_vals = np.asarray(da[lat_name].values, dtype=float)
+    lon_vals = np.asarray(da[lon_name].values, dtype=float)
+    lon_180 = _normalize_lon_to_180(lon_vals)
+
+    lat_mask = (lat_vals >= south) & (lat_vals <= north)
+    lon_mask = (lon_180 >= west) & (lon_180 <= east)
+
+    if not np.any(lat_mask) or not np.any(lon_mask):
+        raise RuntimeError(
+            f"BBox [{west},{south},{east},{north}] does not intersect the WeatherMesh grid."
+        )
+
+    # isel keeps order; works for ascending/descending/non-monotonic coords
+    sub = da.isel({lat_name: lat_mask, lon_name: lon_mask})
+    arr = np.asarray(sub.values, dtype=float)
+    if arr.ndim != 2:
+        arr = np.squeeze(arr)
+    lats = np.asarray(sub[lat_name].values, dtype=float)
+    lons = _normalize_lon_to_180(sub[lon_name].values)
+    return arr, lats, lons
+
+
 class GriddedForecastService:
     def __init__(self, http_client: Optional[httpx.AsyncClient] = None):
         self.enabled = os.getenv("GRIDDED_FORECASTS_ENABLED", "true").lower() in (
@@ -438,73 +491,30 @@ class GriddedForecastService:
     def _netcdf_bytes_to_subset(
         self, content: bytes, west: float, south: float, east: float, north: float
     ):
-        import numpy as np
-
         ds = self._open_netcdf_bytes(content)
-        data_vars = list(ds.data_vars)
-        if not data_vars:
+        try:
+            data_vars = list(ds.data_vars)
+            if not data_vars:
+                raise RuntimeError("NetCDF contained no data variables")
+            da = ds[data_vars[0]]
+            arr, _lats, _lons = subset_dataarray_bbox(da, west, south, east, north)
+            return arr
+        finally:
             ds.close()
-            raise RuntimeError("NetCDF contained no data variables")
-        da = ds[data_vars[0]]
-        while da.ndim > 2:
-            da = da.isel({da.dims[0]: 0})
-
-        lat_name = next((d for d in da.dims if "lat" in d.lower()), None)
-        lon_name = next((d for d in da.dims if "lon" in d.lower()), None)
-        if not lat_name or not lon_name:
-            lat_name = next((c for c in da.coords if "lat" in c.lower()), None)
-            lon_name = next((c for c in da.coords if "lon" in c.lower()), None)
-        if not lat_name or not lon_name:
-            ds.close()
-            raise RuntimeError("Could not identify lat/lon dimensions in NetCDF")
-
-        lat = da[lat_name]
-        lat_asc = bool(lat.values[0] < lat.values[-1])
-        if lat_asc:
-            da = da.sel({lat_name: slice(south, north), lon_name: slice(west, east)})
-        else:
-            da = da.sel({lat_name: slice(north, south), lon_name: slice(west, east)})
-
-        arr = np.asarray(da.values, dtype=float)
-        ds.close()
-        return arr
 
     def _netcdf_bytes_to_subset_coords(
         self, content: bytes, west: float, south: float, east: float, north: float
     ):
         """Return (2D array, lat_1d, lon_1d) for ranking."""
-        import numpy as np
-
         ds = self._open_netcdf_bytes(content)
-        data_vars = list(ds.data_vars)
-        if not data_vars:
+        try:
+            data_vars = list(ds.data_vars)
+            if not data_vars:
+                raise RuntimeError("NetCDF contained no data variables")
+            da = ds[data_vars[0]]
+            return subset_dataarray_bbox(da, west, south, east, north)
+        finally:
             ds.close()
-            raise RuntimeError("NetCDF contained no data variables")
-        da = ds[data_vars[0]]
-        while da.ndim > 2:
-            da = da.isel({da.dims[0]: 0})
-
-        lat_name = next((d for d in da.dims if "lat" in d.lower()), None)
-        lon_name = next((d for d in da.dims if "lon" in d.lower()), None)
-        if not lat_name or not lon_name:
-            lat_name = next((c for c in da.coords if "lat" in c.lower()), None)
-            lon_name = next((c for c in da.coords if "lon" in c.lower()), None)
-        if not lat_name or not lon_name:
-            ds.close()
-            raise RuntimeError("Could not identify lat/lon dimensions in NetCDF")
-
-        lat = da[lat_name]
-        lat_asc = bool(lat.values[0] < lat.values[-1])
-        if lat_asc:
-            da = da.sel({lat_name: slice(south, north), lon_name: slice(west, east)})
-        else:
-            da = da.sel({lat_name: slice(north, south), lon_name: slice(west, east)})
-
-        arr = np.asarray(da.values, dtype=float)
-        lats = np.asarray(da[lat_name].values, dtype=float)
-        lons = np.asarray(da[lon_name].values, dtype=float)
-        ds.close()
-        return arr, lats, lons
 
     async def rank_extrema(
         self,
