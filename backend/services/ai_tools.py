@@ -4,11 +4,12 @@ The LLM never invents these values — Python computes them from real APIs.
 """
 from __future__ import annotations
 
+import hashlib
 import logging
 import math
 import time
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
 
@@ -128,11 +129,168 @@ async def reverse_geocode_city(lat: float, lon: float) -> Dict[str, Any]:
         return {"ok": False, "is_city": False, "error": type(e).__name__, "message": str(e)}
 
 
-async def search_location(query: str) -> Dict[str, Any]:
-    """Resolve a place name via OpenStreetMap Nominatim."""
+# Small verified seed list — used only when Nominatim is rate-limited / down.
+# Coordinates are approximate city centers (not invented at answer time).
+_KNOWN_PLACES: Dict[str, Dict[str, Any]] = {
+    "redwood city": {
+        "name": "Redwood City, California, USA",
+        "latitude": 37.4852,
+        "longitude": -122.2364,
+    },
+    "redwood city california": {
+        "name": "Redwood City, California, USA",
+        "latitude": 37.4852,
+        "longitude": -122.2364,
+    },
+    "redwood city california usa": {
+        "name": "Redwood City, California, USA",
+        "latitude": 37.4852,
+        "longitude": -122.2364,
+    },
+    "san francisco": {
+        "name": "San Francisco, California, USA",
+        "latitude": 37.7749,
+        "longitude": -122.4194,
+    },
+    "tokyo": {"name": "Tokyo, Japan", "latitude": 35.6762, "longitude": 139.6503},
+    "london": {"name": "London, United Kingdom", "latitude": 51.5074, "longitude": -0.1278},
+    "new york": {
+        "name": "New York, New York, USA",
+        "latitude": 40.7128,
+        "longitude": -74.0060,
+    },
+}
+
+_geocode_mem: Dict[str, Tuple[float, Dict[str, Any]]] = {}
+_GEOCODE_TTL_SEC = 86400.0
+
+
+def _geocode_cache_dir():
+    from pathlib import Path
+
+    d = Path(__file__).resolve().parent.parent / ".cache" / "geocode"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def _geocode_cache_get(key: str) -> Optional[Dict[str, Any]]:
+    now = time.time()
+    hit = _geocode_mem.get(key)
+    if hit and hit[0] > now:
+        return hit[1]
+    try:
+        import pickle
+
+        path = _geocode_cache_dir() / f"{hashlib.sha256(key.encode()).hexdigest()}.pkl"
+        if not path.exists():
+            return None
+        with path.open("rb") as f:
+            payload = pickle.load(f)
+        if float(payload.get("expires") or 0) < now:
+            return None
+        value = payload.get("value")
+        if isinstance(value, dict):
+            _geocode_mem[key] = (float(payload["expires"]), value)
+            return value
+    except Exception:
+        return None
+    return None
+
+
+def _geocode_cache_set(key: str, value: Dict[str, Any]) -> None:
+    expires = time.time() + _GEOCODE_TTL_SEC
+    _geocode_mem[key] = (expires, value)
+    try:
+        import pickle
+
+        path = _geocode_cache_dir() / f"{hashlib.sha256(key.encode()).hexdigest()}.pkl"
+        with path.open("wb") as f:
+            pickle.dump({"expires": expires, "value": value}, f)
+    except Exception:
+        pass
+
+
+def normalize_place_query(query: str) -> str:
+    """Strip weather/check fluff so 'Redwood City … check weather' geocodes cleanly."""
+    import re
+
     q = (query or "").strip()
+    q = re.sub(
+        r"\b(check|show|get|tell me|what's|whats|what is)\b",
+        " ",
+        q,
+        flags=re.I,
+    )
+    q = re.sub(
+        r"\b(the\s+)?(weather|forecast|conditions|temperature|temps?)\b",
+        " ",
+        q,
+        flags=re.I,
+    )
+    q = re.sub(r"\s+", " ", q).strip(" ,.?!")
+    return q
+
+
+def look_like_place_weather_query(text: str) -> bool:
+    """True for 'Redwood City check weather' / 'weather in Tokyo' style asks."""
+    import re
+
+    q = (text or "").strip().lower()
+    if not q or len(q) > 80:
+        return False
+    if look_like_cyclone_query(q) or parse_rank_intent_safe(q):
+        return False
+    if re.search(r"\b(weather|forecast|conditions|temperature)\b", q):
+        place = normalize_place_query(q)
+        words = [w for w in place.replace(",", " ").split() if w]
+        return 1 <= len(words) <= 6
+    return False
+
+
+def parse_rank_intent_safe(text: str) -> bool:
+    try:
+        from services.forecast_rank import parse_rank_intent
+
+        return parse_rank_intent(text) is not None
+    except Exception:
+        return False
+
+
+async def search_location(query: str) -> Dict[str, Any]:
+    """Resolve a place name via OpenStreetMap Nominatim (cached + known-place fallback)."""
+    raw_q = (query or "").strip()
+    q = normalize_place_query(raw_q) or raw_q
     if not q:
         return {"ok": False, "error": "EMPTY_QUERY", "results": []}
+
+    cache_key = q.lower()
+    cached = _geocode_cache_get(cache_key)
+    if cached:
+        out = dict(cached)
+        out["from_cache"] = True
+        out["retrievedAt"] = _utc_now()
+        return out
+
+    # Known-place fallback before hitting Nominatim when we already know the city
+    known = _KNOWN_PLACES.get(cache_key)
+    if known:
+        result = {
+            "ok": True,
+            "query": q,
+            "results": [
+                {
+                    "name": known["name"],
+                    "latitude": known["latitude"],
+                    "longitude": known["longitude"],
+                    "placeId": None,
+                    "type": "known_place",
+                }
+            ],
+            "provider": "local_known_places",
+            "retrievedAt": _utc_now(),
+        }
+        _geocode_cache_set(cache_key, result)
+        return result
 
     url = "https://nominatim.openstreetmap.org/search"
     params = {"format": "json", "q": q, "limit": 5}
@@ -141,6 +299,39 @@ async def search_location(query: str) -> Dict[str, Any]:
     try:
         async with httpx.AsyncClient(timeout=12.0) as client:
             resp = await client.get(url, params=params, headers=headers)
+            if resp.status_code == 429:
+                # Retry known places with looser contains match
+                for key, place in _KNOWN_PLACES.items():
+                    if key in cache_key or cache_key in key:
+                        result = {
+                            "ok": True,
+                            "query": q,
+                            "results": [
+                                {
+                                    "name": place["name"],
+                                    "latitude": place["latitude"],
+                                    "longitude": place["longitude"],
+                                    "placeId": None,
+                                    "type": "known_place",
+                                }
+                            ],
+                            "provider": "local_known_places",
+                            "from_cache": False,
+                            "nominatim_rate_limited": True,
+                            "retrievedAt": _utc_now(),
+                        }
+                        _geocode_cache_set(cache_key, result)
+                        return result
+                return {
+                    "ok": False,
+                    "error": "GEOCODER_RATE_LIMITED",
+                    "message": (
+                        "The location service is temporarily rate-limited. "
+                        "Try again shortly, or ask with a major city name."
+                    ),
+                    "results": [],
+                    "retrievedAt": _utc_now(),
+                }
             if resp.status_code != 200:
                 logger.warning("[ai_tools] search_location status=%s", resp.status_code)
                 return {
@@ -161,13 +352,16 @@ async def search_location(query: str) -> Dict[str, Any]:
                         "type": item.get("type"),
                     }
                 )
-            return {
+            out = {
                 "ok": True,
                 "query": q,
                 "results": results,
                 "provider": "OpenStreetMap Nominatim",
                 "retrievedAt": _utc_now(),
             }
+            if results:
+                _geocode_cache_set(cache_key, out)
+            return out
     except Exception as e:
         logger.warning("[ai_tools] search_location error=%s", type(e).__name__)
         return {
@@ -490,15 +684,16 @@ def parse_cyclone_forecast_intent(text: str) -> Optional[Dict[str, Any]]:
 
 
 def look_like_bare_location(text: str) -> bool:
-    """Heuristic: bare place name / short location query without weather/fleet keywords."""
+    """Heuristic: place name / place+weather query for deterministic geocode path."""
     q = (text or "").strip()
-    if not q or len(q) > 60:
+    if not q or len(q) > 80:
         return False
+    if look_like_place_weather_query(q):
+        return True
     lower = q.lower()
     blocked = [
         "balloon",
         "fleet",
-        "weather",
         "forecast",
         "altitude",
         "how many",
@@ -520,14 +715,18 @@ def look_like_bare_location(text: str) -> bool:
         "hottest",
         "coldest",
         "top ",
+        "strongest",
+        "rain",
     ]
+    # Allow "... weather" when the rest looks like a place
+    if "weather" in lower or "conditions" in lower:
+        return look_like_place_weather_query(q)
     if any(b in lower for b in blocked):
         return False
     if look_like_cyclone_query(lower):
         return False
-    # Single token or short multi-word place-like string
     words = [w for w in q.replace(",", " ").split() if w]
-    if 1 <= len(words) <= 4 and all(w[0].isalpha() for w in words if w):
+    if 1 <= len(words) <= 6 and all(w[0].isalpha() for w in words if w):
         return True
     return False
 

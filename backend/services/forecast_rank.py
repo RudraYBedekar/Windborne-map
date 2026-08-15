@@ -125,16 +125,24 @@ def parse_rank_intent(text: str) -> Optional[Dict[str, Any]]:
         if m2:
             limit = max(1, min(int(m2.group(1)), 10))
 
-    hours = 24
+    hours = 0  # current / analysis time by default — not a future window
+    # Only use a future hour when the user explicitly asks for one
     hm = re.search(r"(?:next|over|in)\s+(\d{1,3})\s*h(?:ours?)?", q)
     if hm:
         hours = int(hm.group(1))
-    elif "48" in q:
+    elif re.search(r"\b\+?\s*48\s*h", q) or re.search(r"\bin\s+48\b", q):
         hours = 48
-    elif "72" in q:
+    elif re.search(r"\b\+?\s*72\s*h", q):
         hours = 72
-    elif "12" in q and "24" not in q:
+    elif re.search(r"\b\+?\s*12\s*h", q) and "24" not in q:
         hours = 12
+    elif re.search(r"\b\+?\s*24\s*h", q) or re.search(
+        r"\b(next|over|in)\s+24\b|\bnext\s+day\b|\btomorrow\b", q
+    ):
+        hours = 24
+    # Phrases like "over the next 24 hours" already caught; plain "current" stays 0
+    if re.search(r"\b(current|now|right now|present|latest)\b", q):
+        hours = 0
 
     region = None
     for name in (
@@ -233,7 +241,7 @@ class ForecastRankService:
         *,
         metric: str,
         region: Optional[str] = None,
-        forecast_window_hours: int = 24,
+        forecast_window_hours: int = 0,
         limit: int = 5,
         map_bounds: Optional[Dict[str, float]] = None,
         selected_location: Optional[Dict[str, Any]] = None,

@@ -274,7 +274,7 @@ class BedrockChatService:
                 out = await self.rank_service.rank_locations(
                     metric=tool_input.get("metric", "precipitation"),
                     region=tool_input.get("region"),
-                    forecast_window_hours=int(tool_input.get("forecast_window_hours") or 24),
+                    forecast_window_hours=int(tool_input.get("forecast_window_hours") or 0),
                     limit=int(tool_input.get("limit") or 5),
                     map_bounds=self._map_bounds,
                     selected_location=self._selected_location,
@@ -457,7 +457,7 @@ class BedrockChatService:
         tool_input = {
             "metric": intent["metric"],
             "region": intent.get("region"),
-            "forecast_window_hours": intent.get("forecast_window_hours", 24),
+            "forecast_window_hours": intent.get("forecast_window_hours", 0),
             "limit": intent.get("limit", 5),
             "world": bool(intent.get("world")),
         }
@@ -472,9 +472,11 @@ class BedrockChatService:
             reply = tool_result.get("message") or "Could not rank forecast locations from WeatherMesh."
         else:
             locs = tool_result.get("locations") or []
+            hour_used = tool_result.get("forecast_hour_used")
+            hour_label = "current" if int(hour_used or 0) == 0 else f"+{hour_used}h"
             lines = [
                 f"**Top {len(locs)} {tool_result.get('label') or intent['metric']} locations** "
-                f"(WeatherMesh `{tool_result.get('variable')}` · +{tool_result.get('forecast_hour_used')}h):\n"
+                f"(WeatherMesh `{tool_result.get('variable')}` · {hour_label}):\n"
             ]
             for row in locs:
                 lines.append(
@@ -619,16 +621,27 @@ class BedrockChatService:
 
     async def _location_first_path(self, query: str) -> Optional[Dict[str, Any]]:
         """Deterministic routing for bare place names — never invent fleet facts."""
-        if not ai_tools.look_like_bare_location(query):
+        if not (
+            ai_tools.look_like_bare_location(query)
+            or ai_tools.look_like_place_weather_query(query)
+        ):
             return None
 
-        loc = await ai_tools.search_location(query)
+        place_q = ai_tools.normalize_place_query(query) or query
+        loc = await ai_tools.search_location(place_q)
         if not loc.get("ok") or not loc.get("results"):
-            return {
-                "reply": (
-                    f"I couldn't resolve **{query}** to a map location. "
+            err = loc.get("error") or ""
+            if err == "GEOCODER_RATE_LIMITED":
+                msg = loc.get("message") or (
+                    "The location service is temporarily rate-limited. Try again shortly."
+                )
+            else:
+                msg = (
+                    f"I couldn't resolve **{place_q}** to a map location. "
                     "Try a more specific place name (city + state/country)."
-                ),
+                )
+            return {
+                "reply": msg,
                 "provider": self.provider_name,
                 "model": self.model_id,
                 "model_display_name": self.display_name,
@@ -636,11 +649,11 @@ class BedrockChatService:
                 "sources": [
                     {
                         "type": "geocoder",
-                        "provider": "OpenStreetMap Nominatim",
+                        "provider": loc.get("provider") or "OpenStreetMap Nominatim",
                         "retrievedAt": loc.get("retrievedAt"),
                     }
                 ],
-                "toolCalls": [{"name": "search_location", "input": {"query": query}, "result": loc}],
+                "toolCalls": [{"name": "search_location", "input": {"query": place_q}, "result": loc}],
                 "actions": [],
                 "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
             }
@@ -656,11 +669,12 @@ class BedrockChatService:
             }
         ]
 
-        # Optionally attach weather for stronger UX
+        # Always attach weather for "… check weather" / place+weather style asks
         weather_bit = ""
         weather_src = None
-        tool_calls = [{"name": "search_location", "input": {"query": query}, "result": loc}]
-        if self.weather_client:
+        tool_calls = [{"name": "search_location", "input": {"query": place_q}, "result": loc}]
+        want_weather = ai_tools.look_like_place_weather_query(query) or True
+        if self.weather_client and want_weather:
             wx = await ai_tools.get_weather(lat, lon, self.weather_client)
             tool_calls.append(
                 {"name": "get_weather", "input": {"latitude": lat, "longitude": lon}, "result": wx}
@@ -683,21 +697,27 @@ class BedrockChatService:
                     "isFallback": wx.get("isFallback"),
                     "retrievedAt": wx.get("retrievedAt"),
                 }
+            else:
+                weather_bit = (
+                    f"\n\nWeatherMesh conditions are unavailable right now "
+                    f"({wx.get('message') or wx.get('error') or 'no data'})."
+                )
+
+        provider_note = ""
+        if loc.get("provider") == "local_known_places":
+            provider_note = " (resolved from local place cache while Nominatim was limited)"
+        elif loc.get("from_cache"):
+            provider_note = " (cached geocode)"
 
         reply = (
-            f"📍 I found **{top.get('name')}** "
-            f"(`{lat:.4f}°, {lon:.4f}°`).\n\n"
-            f"Would you like me to:\n"
-            f"- check WeatherMesh conditions here,\n"
-            f"- move the globe to this location,\n"
-            f"- or look for nearby balloons "
-            f"(note: balloon markers are currently hidden because the public Treasure feed is not operationally accurate)?"
+            f"📍 **{top.get('name')}** "
+            f"(`{lat:.4f}°, {lon:.4f}°`){provider_note}."
             f"{weather_bit}"
         )
         sources = [
             {
                 "type": "geocoder",
-                "provider": "OpenStreetMap Nominatim",
+                "provider": loc.get("provider") or "OpenStreetMap Nominatim",
                 "retrievedAt": loc.get("retrievedAt"),
             }
         ]

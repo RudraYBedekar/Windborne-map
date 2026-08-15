@@ -73,7 +73,11 @@ def test_bare_location_heuristic():
     assert ai_tools.look_like_bare_location("fairfax") is True
     assert ai_tools.look_like_bare_location("Tokyo") is True
     assert ai_tools.look_like_bare_location("how many balloons are active?") is False
-    assert ai_tools.look_like_bare_location("weather in fairfax") is False
+    # Place + weather should route to geocode (not invent coords in Bedrock)
+    assert ai_tools.look_like_bare_location("weather in fairfax") is True
+    assert ai_tools.look_like_place_weather_query(
+        "redwood city california usa check weather"
+    )
     assert ai_tools.look_like_bare_location("What is a solar terminator?") is False
     assert ai_tools.look_like_bare_location("cyclones list") is False
     assert ai_tools.look_like_bare_location("active hurricanes") is False

@@ -164,6 +164,32 @@ def test_rank_intent_phrases(query, metric, region, limit):
     assert intent["limit"] == limit
 
 
+def test_rank_defaults_to_current_hour():
+    intent = parse_rank_intent(
+        "Show me the 5 locations with the strongest winds in Asia."
+    )
+    assert intent is not None
+    assert intent["forecast_window_hours"] == 0
+    assert intent["region"] == "asia"
+
+
+def test_rank_explicit_24h_still_parsed():
+    intent = parse_rank_intent(
+        "Show me the top 5 snowiest locations in the US over the next 24 hours."
+    )
+    assert intent is not None
+    assert intent["forecast_window_hours"] == 24
+
+
+def test_place_weather_resolves_redwood_city():
+    assert ai_tools.look_like_place_weather_query(
+        "redwood city california usa check weather"
+    )
+    place = ai_tools.normalize_place_query("redwood city california usa check weather")
+    assert "redwood city" in place.lower()
+    assert "weather" not in place.lower()
+
+
 def test_rank_intent_missing_region_asks_later():
     intent = parse_rank_intent("Show me the top 5 snowiest locations.")
     assert intent is not None
