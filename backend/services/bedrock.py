@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import time
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
@@ -327,9 +328,21 @@ class BedrockChatService:
         if not self.client:
             return self._unavailable_response(self.last_error or "Bedrock client not initialized")
 
+        # Bound payload size / token cost (prompt-injection & abuse mitigation)
+        max_chars = int(os.getenv("CHAT_MAX_MESSAGE_CHARS", "2000") or "2000")
+        sanitized: List[Dict[str, str]] = []
+        for m in messages[-12:]:
+            content = (m.get("content") or "")[:max_chars]
+            role = m.get("role") or "user"
+            if role not in ("user", "assistant"):
+                role = "user"
+            sanitized.append({"role": role, "content": content})
+        messages = sanitized
+        user_message = messages[-1].get("content", "") if messages else ""
+
         # Inject light session context (facts only if provided by app — still prefer tools)
         context_bits = []
-        if selected_balloon:
+        if selected_balloon and self.balloons_enabled:
             context_bits.append(f"UI selected balloon id hint: {selected_balloon.get('id')}")
         if weather_context and weather_context.get("provider"):
             context_bits.append(
@@ -338,7 +351,7 @@ class BedrockChatService:
             )
         if not self.balloons_enabled:
             context_bits.append(
-                "BALLOONS_ENABLED=false — do not imply markers are shown on the globe."
+                "BALLOONS_ENABLED=false — fleet tools are unavailable; do not invent balloon data."
             )
 
         system = SYSTEM_PROMPT
@@ -346,7 +359,7 @@ class BedrockChatService:
             system += "\n\n## Session hints\n- " + "\n- ".join(context_bits)
 
         bedrock_messages = []
-        for m in messages[-12:]:
+        for m in messages:
             role = "user" if m.get("role") == "user" else "assistant"
             bedrock_messages.append(
                 {"role": role, "content": [{"text": m.get("content", "")}]}
@@ -355,18 +368,21 @@ class BedrockChatService:
         tool_trace: List[Dict[str, Any]] = []
         sources: List[Dict[str, Any]] = []
         actions: List[Dict[str, Any]] = []
+        active_tools = ai_tools.tools_for_config(self.balloons_enabled)
 
         try:
             # Tool loop (max 3 rounds)
             for _round in range(3):
-                response = self.client.converse(
-                    modelId=self.model_id,
-                    messages=bedrock_messages,
-                    system=[{"text": system}],
-                    toolConfig={"tools": ai_tools.BEDROCK_TOOLS},
+                converse_kwargs: Dict[str, Any] = {
+                    "modelId": self.model_id,
+                    "messages": bedrock_messages,
+                    "system": [{"text": system}],
                     # Haiku 4.5 rejects temperature + topP together — use temperature only
-                    inferenceConfig={"maxTokens": 1024, "temperature": 0.2},
-                )
+                    "inferenceConfig": {"maxTokens": 1024, "temperature": 0.2},
+                }
+                if active_tools:
+                    converse_kwargs["toolConfig"] = {"tools": active_tools}
+                response = self.client.converse(**converse_kwargs)
                 stop = response.get("stopReason")
                 output_msg = response["output"]["message"]
                 bedrock_messages.append(output_msg)
@@ -410,7 +426,14 @@ class BedrockChatService:
                     name = tu["name"]
                     tool_input = tu.get("input") or {}
                     tool_use_id = tu["toolUseId"]
-                    result = await self._execute_tool(name, tool_input)
+                    if name in ("get_fleet_status", "get_balloon") and not self.balloons_enabled:
+                        result = {
+                            "ok": False,
+                            "error": "FLEET_TOOLS_DISABLED",
+                            "message": "Balloon/fleet tools are disabled (BALLOONS_ENABLED=false).",
+                        }
+                    else:
+                        result = await self._execute_tool(name, tool_input)
                     tool_trace.append(
                         {"name": name, "input": tool_input, "result": result}
                     )

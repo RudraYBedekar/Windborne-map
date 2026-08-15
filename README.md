@@ -79,6 +79,11 @@ Open [http://localhost:3000](http://localhost:3000).
 | `AWS_ACCESS_KEY_ID` / `SECRET` | `backend/.env` | Leave empty on EC2 with IAM role |
 | `BALLOONS_ENABLED` | `backend/.env` | Allow AI fleet tools (`false` by default) |
 | `NEXT_PUBLIC_SHOW_BALLOONS` | `.env.local` | Show balloon markers on the map |
+| `ALLOWED_ORIGINS` | `backend/.env` | Comma-separated CORS origins (default localhost:3000; no `*`) |
+| `CHAT_RPM_LIMIT` | `backend/.env` | Per-IP chat cap (default **10**/min) |
+| `WEATHER_RPM_LIMIT` | `backend/.env` | Per-IP weather cap (default **30**/min) |
+| `API_KEY` | `backend/.env` | If set, require `X-API-Key` on `/api/chat` and auth-status |
+| `CHAT_MAX_MESSAGE_CHARS` | `backend/.env` | Truncate chat messages (default 2000) |
 | `OPENWEATHER_KEY` | `backend/.env` | OpenWeatherMap tile key (server-side proxy) |
 | `OPENWEATHER_RPM_LIMIT` | `backend/.env` | Cap tile fetches (default **50**/min; under a 60 RPM plan) |
 | `NEXT_PUBLIC_OPENWEATHER_ENABLED` | `.env.local` | Show Clouds/Temp/Wind toggles when key is backend-only |
@@ -117,7 +122,8 @@ src/config/map.ts        Basemaps & overlay config
 
 ## Status
 
-- WeatherMesh + Vicky-AI grounding: **production-ready**
+- WeatherMesh + Vicky-AI grounding: **demo-ready** (functional prototype — not a hardened production service)
 - Day/night terminator: verified against solar geometry
 - Balloon constellation UI: **available but disabled by default**
-- Deployed stack: Next.js + FastAPI under PM2 on EC2 with Bedrock via instance role
+- Hardening: chat/weather RPM limits, explicit CORS, optional `API_KEY`, telemetry cache, OpenWeather 50 RPM proxy
+- Deploy: EC2 + PM2 with Bedrock IAM role — see [`AWS_BEDROCK_EC2_GUIDE.md`](./AWS_BEDROCK_EC2_GUIDE.md); optional `docker-compose.yml`

@@ -5,15 +5,6 @@ import logging
 from typing import Dict, Any, Optional, List
 import httpx
 from datetime import datetime, timezone
-from pathlib import Path
-
-try:
-    from dotenv import load_dotenv
-    base_dir = Path(__file__).resolve().parent.parent
-    load_dotenv(base_dir / ".env")
-    load_dotenv(base_dir.parent / ".env")
-except ImportError:
-    pass
 
 logger = logging.getLogger("windborne_service")
 logging.basicConfig(level=logging.INFO)
@@ -21,23 +12,6 @@ logging.basicConfig(level=logging.INFO)
 
 class WindBorneClient:
     def __init__(self, api_key: Optional[str] = None, base_url: Optional[str] = None):
-        if not api_key:
-            base_dir = Path(__file__).resolve().parent.parent
-            for p in [
-                base_dir / ".env",
-                base_dir / ".env.local",
-                base_dir.parent / ".env",
-                base_dir.parent / ".env.local",
-            ]:
-                if p.exists():
-                    with open(p, "r", encoding="utf-8") as f:
-                        for line in f:
-                            line = line.strip()
-                            if line and not line.startswith("#") and "=" in line:
-                                k, v = line.split("=", 1)
-                                k, v = k.strip(), v.strip().strip("'\"")
-                                if k and not os.getenv(k):
-                                    os.environ[k] = v
         self.api_key = (
             api_key
             or os.getenv("WB_API_KEY")
@@ -52,6 +26,16 @@ class WindBorneClient:
         # Only successful WindBorne responses are cached (never Open-Meteo fallback).
         self._cache: Dict[str, tuple] = {}
         self._cache_ttl = 300  # 5 minutes
+        self._http: Optional[httpx.AsyncClient] = None
+
+    def set_http_client(self, client: Optional[httpx.AsyncClient]) -> None:
+        self._http = client
+
+    async def _get(self, url: str, **kwargs) -> httpx.Response:
+        if self._http is not None:
+            return await self._http.get(url, **kwargs)
+        async with httpx.AsyncClient(timeout=kwargs.pop("timeout", 12.0)) as client:
+            return await client.get(url, **kwargs)
 
     def _get_headers(self) -> Dict[str, str]:
         headers = {
@@ -66,31 +50,30 @@ class WindBorneClient:
         """Check API key status against WindBorne authentication endpoint."""
         url = f"{self.base_url}/debug/v1/auth_status"
         try:
-            async with httpx.AsyncClient(timeout=10.0) as client:
-                resp = await client.get(url, headers=self._get_headers())
-                if resp.status_code == 200:
-                    data = resp.json()
-                    is_authed = isinstance(data, dict) and (
-                        data.get("authed") is True or data.get("authenticated") is True
-                    )
-                    return {
-                        "authenticated": is_authed,
-                        "provider": "WindBorne WeatherMesh",
-                        "details": data if isinstance(data, dict) else {},
-                    }
-                if resp.status_code in (401, 403):
-                    return {
-                        "authenticated": False,
-                        "provider": "WindBorne WeatherMesh",
-                        "error": "UNAUTHORIZED",
-                        "message": "Invalid or expired WindBorne API key.",
-                    }
+            resp = await self._get(url, headers=self._get_headers(), timeout=10.0)
+            if resp.status_code == 200:
+                data = resp.json()
+                is_authed = isinstance(data, dict) and (
+                    data.get("authed") is True or data.get("authenticated") is True
+                )
+                return {
+                    "authenticated": is_authed,
+                    "provider": "WindBorne WeatherMesh",
+                    "details": data if isinstance(data, dict) else {},
+                }
+            if resp.status_code in (401, 403):
                 return {
                     "authenticated": False,
                     "provider": "WindBorne WeatherMesh",
-                    "error": f"HTTP_{resp.status_code}",
-                    "message": f"Auth check returned status {resp.status_code}",
+                    "error": "UNAUTHORIZED",
+                    "message": "Invalid or expired WindBorne API key.",
                 }
+            return {
+                "authenticated": False,
+                "provider": "WindBorne WeatherMesh",
+                "error": f"HTTP_{resp.status_code}",
+                "message": f"Auth check returned status {resp.status_code}",
+            }
         except httpx.TimeoutException:
             logger.error("Authentication check timed out")
             return {
@@ -152,46 +135,45 @@ class WindBorneClient:
             return await self._fetch_open_meteo_fallback(lat, lon)
 
         try:
-            async with httpx.AsyncClient(timeout=12.0) as client:
-                resp = await client.get(endpoint, params=params, headers=headers)
-                logger.info(f"[WindBorne] status={resp.status_code}")
+            resp = await self._get(endpoint, params=params, headers=headers, timeout=12.0)
+            logger.info(f"[WindBorne] status={resp.status_code}")
 
-                if resp.status_code == 200:
-                    try:
-                        response_json = resp.json()
-                    except Exception as parse_err:
-                        logger.warning(f"[WindBorne] error=invalid JSON: {parse_err}")
-                        logger.info("[WindBorne] activating Open-Meteo fallback")
-                        return await self._fetch_open_meteo_fallback(lat, lon)
+            if resp.status_code == 200:
+                try:
+                    response_json = resp.json()
+                except Exception as parse_err:
+                    logger.warning(f"[WindBorne] error=invalid JSON: {parse_err}")
+                    logger.info("[WindBorne] activating Open-Meteo fallback")
+                    return await self._fetch_open_meteo_fallback(lat, lon)
 
-                    try:
-                        normalized = self._normalize_response(response_json, lat, lon)
-                    except Exception as norm_err:
-                        logger.warning(
-                            f"[WindBorne] error=normalize failed: {type(norm_err).__name__}: {norm_err}"
-                        )
-                        logger.info("[WindBorne] activating Open-Meteo fallback")
-                        return await self._fetch_open_meteo_fallback(lat, lon)
+                try:
+                    normalized = self._normalize_response(response_json, lat, lon)
+                except Exception as norm_err:
+                    logger.warning(
+                        f"[WindBorne] error=normalize failed: {type(norm_err).__name__}: {norm_err}"
+                    )
+                    logger.info("[WindBorne] activating Open-Meteo fallback")
+                    return await self._fetch_open_meteo_fallback(lat, lon)
 
-                    if isinstance(normalized, dict) and "error" in normalized:
-                        logger.warning(
-                            f"[WindBorne] error={normalized.get('error')} {normalized.get('message')}"
-                        )
-                        logger.info("[WindBorne] activating Open-Meteo fallback")
-                        return await self._fetch_open_meteo_fallback(lat, lon)
+                if isinstance(normalized, dict) and "error" in normalized:
+                    logger.warning(
+                        f"[WindBorne] error={normalized.get('error')} {normalized.get('message')}"
+                    )
+                    logger.info("[WindBorne] activating Open-Meteo fallback")
+                    return await self._fetch_open_meteo_fallback(lat, lon)
 
-                    model = normalized.get("model", "WeatherMesh")
-                    logger.info(f"[WindBorne] provider=WeatherMesh model={model}")
-                    # Cache only confirmed WindBorne successes
-                    self._cache[cache_key] = (normalized, now + self._cache_ttl)
-                    return normalized
+                model = normalized.get("model", "WeatherMesh")
+                logger.info(f"[WindBorne] provider=WeatherMesh model={model}")
+                # Cache only confirmed WindBorne successes
+                self._cache[cache_key] = (normalized, now + self._cache_ttl)
+                return normalized
 
-                # Explicit failure statuses → fallback
-                body_preview = (resp.text or "")[:200].replace("\n", " ")
-                logger.warning(f"[WindBorne] status={resp.status_code}")
-                logger.warning(f"[WindBorne] error={body_preview}")
-                logger.info("[WindBorne] activating Open-Meteo fallback")
-                return await self._fetch_open_meteo_fallback(lat, lon)
+            # Explicit failure statuses → fallback
+            body_preview = (resp.text or "")[:200].replace("\n", " ")
+            logger.warning(f"[WindBorne] status={resp.status_code}")
+            logger.warning(f"[WindBorne] error={body_preview}")
+            logger.info("[WindBorne] activating Open-Meteo fallback")
+            return await self._fetch_open_meteo_fallback(lat, lon)
 
         except httpx.TimeoutException:
             logger.warning("[WindBorne] status=timeout")
@@ -386,27 +368,26 @@ class WindBorneClient:
             f"precipitation,surface_pressure,wind_speed_10m,wind_direction_10m,cloud_cover"
         )
         try:
-            async with httpx.AsyncClient(timeout=10.0) as client:
-                resp = await client.get(url)
-                if resp.status_code == 200:
-                    data = resp.json()
-                    curr = data.get("current", {})
-                    return {
-                        "provider": "Open-Meteo (Fallback)",
-                        "model": "open-meteo-v1",
-                        "coordinates": {"latitude": lat, "longitude": lon},
-                        "current": {
-                            "temperature": curr.get("temperature_2m"),
-                            "apparentTemperature": curr.get("apparent_temperature"),
-                            "humidity": curr.get("relative_humidity_2m"),
-                            "windSpeed": curr.get("wind_speed_10m"),
-                            "windDirection": curr.get("wind_direction_10m"),
-                            "cloudCover": curr.get("cloud_cover"),
-                            "pressure": curr.get("surface_pressure"),
-                            "precipitation": curr.get("precipitation"),
-                        },
-                        "forecastTime": curr.get("time") or None,
-                    }
+            resp = await self._get(url, timeout=10.0)
+            if resp.status_code == 200:
+                data = resp.json()
+                curr = data.get("current", {})
+                return {
+                    "provider": "Open-Meteo (Fallback)",
+                    "model": "open-meteo-v1",
+                    "coordinates": {"latitude": lat, "longitude": lon},
+                    "current": {
+                        "temperature": curr.get("temperature_2m"),
+                        "apparentTemperature": curr.get("apparent_temperature"),
+                        "humidity": curr.get("relative_humidity_2m"),
+                        "windSpeed": curr.get("wind_speed_10m"),
+                        "windDirection": curr.get("wind_direction_10m"),
+                        "cloudCover": curr.get("cloud_cover"),
+                        "pressure": curr.get("surface_pressure"),
+                        "precipitation": curr.get("precipitation"),
+                    },
+                    "forecastTime": curr.get("time") or None,
+                }
         except Exception as err:
             logger.error(f"[Open-Meteo Fallback] Request failed: {type(err).__name__}")
 

@@ -9,6 +9,7 @@ export interface WeatherData {
     provider?: string;
     model?: string;
     forecastTime?: string;
+    isFallback?: boolean;
     distribution?: {
         mean?: number;
         standardDeviation?: number;
@@ -26,17 +27,8 @@ export async function fetchWeather(lat: number, lon: number, cityName?: string):
             params.append('city', cityName);
         }
 
-        // Call our Next.js API proxy route which connects to FastAPI backend / WindBorne API
-        let res = await fetch(`/api/weather?${params.toString()}`);
-        
-        // Fallback to direct Python FastAPI backend URL if API route is unavailable
-        if (!res.ok && typeof window !== 'undefined') {
-            try {
-                res = await fetch(`http://localhost:8000/api/weather?${params.toString()}`);
-            } catch {
-                // Ignore fallback error and handle below
-            }
-        }
+        // Always use the Next.js API proxy — never call localhost from the browser
+        const res = await fetch(`/api/weather?${params.toString()}`);
 
         if (!res.ok) {
             throw new Error(`Weather API failed with status ${res.status}`);
@@ -49,8 +41,12 @@ export async function fetchWeather(lat: number, lon: number, cityName?: string):
             return null;
         }
 
-        // Support normalized WindBorne WeatherMesh backend response contract
         const current = data.current || data;
+        const provider = data.provider || 'WindBorne WeatherMesh';
+        const isFallback =
+            Boolean(data.isFallback) ||
+            String(provider).toLowerCase().includes('fallback') ||
+            String(provider).toLowerCase().includes('open-meteo');
 
         return {
             temperature: typeof current.temperature === 'number' ? current.temperature : (current.temp ?? 0),
@@ -60,9 +56,10 @@ export async function fetchWeather(lat: number, lon: number, cityName?: string):
             cloudCover: current.cloudCover ?? current.cloud_cover,
             pressure: current.pressure,
             precipitation: current.precipitation,
-            provider: data.provider || 'WindBorne WeatherMesh',
+            provider,
             model: data.model || 'WeatherMesh',
             forecastTime: data.forecastTime,
+            isFallback,
             distribution: data.distribution
         };
     } catch (err) {

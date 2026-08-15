@@ -12,11 +12,7 @@ import {
     Droplets,
     Gauge,
     Compass,
-    Database,
-    FileSpreadsheet,
-    FileJson,
     Download,
-    CheckCircle2
 } from 'lucide-react';
 
 interface CityWeatherPanelProps {
@@ -139,6 +135,9 @@ export default function CityWeatherPanel({
                             <div className="text-right text-[10px] text-slate-400">
                                 <div>Provider: <span className="text-cyan-300 font-bold">{weather.provider || 'WindBorne'}</span></div>
                                 <div>Model: <span className="text-slate-300">{weather.model || 'wm-6'}</span></div>
+                                {weather.isFallback && (
+                                    <div className="mt-1 text-amber-400">WeatherMesh down — Open-Meteo fallback</div>
+                                )}
                             </div>
                         </div>
 
@@ -180,15 +179,6 @@ export default function CityWeatherPanel({
                                     {weather.precipitation !== undefined ? `${weather.precipitation} mm/h` : '0.0 mm/h'}
                                 </div>
                             </div>
-                        </div>
-
-                        {/* Local Storage Status (JSON + CSV) */}
-                        <div className="p-2.5 rounded-lg bg-emerald-950/40 border border-emerald-800/60 text-emerald-300 text-[11px] flex items-center justify-between">
-                            <div className="flex items-center gap-1.5">
-                                <FileJson className="w-4 h-4 text-emerald-400 shrink-0" />
-                                <span>Saved to weather_data_log.json & CSV</span>
-                            </div>
-                            <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
                         </div>
                     </>
                 ) : (

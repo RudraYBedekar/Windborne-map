@@ -34,6 +34,10 @@ class OpenWeatherTileProxy:
         self._cache: Dict[str, Tuple[float, bytes, str]] = {}
         self._cache_ttl = float(os.getenv("OPENWEATHER_TILE_CACHE_TTL", "600") or "600")
         self._cache_max = int(os.getenv("OPENWEATHER_TILE_CACHE_MAX", "256") or "256")
+        self._http: Optional[httpx.AsyncClient] = None
+
+    def set_http_client(self, client: Optional[httpx.AsyncClient]) -> None:
+        self._http = client
 
     @property
     def enabled(self) -> bool:
@@ -90,13 +94,16 @@ class OpenWeatherTileProxy:
             f"https://tile.openweathermap.org/map/{layer_path}/{z}/{x}/{y}.png"
             f"?appid={self.api_key}"
         )
-        async with httpx.AsyncClient(timeout=20.0) as client:
-            resp = await client.get(url)
-            if resp.status_code == 429:
-                raise RuntimeError("OpenWeatherMap upstream rate limit (429)")
-            resp.raise_for_status()
-            content_type = resp.headers.get("content-type", "image/png")
-            body = resp.content
+        if self._http is not None:
+            resp = await self._http.get(url)
+        else:
+            async with httpx.AsyncClient(timeout=20.0) as client:
+                resp = await client.get(url)
+        if resp.status_code == 429:
+            raise RuntimeError("OpenWeatherMap upstream rate limit (429)")
+        resp.raise_for_status()
+        content_type = resp.headers.get("content-type", "image/png")
+        body = resp.content
 
         self._cache_set(cache_key, body, content_type)
         return body, content_type

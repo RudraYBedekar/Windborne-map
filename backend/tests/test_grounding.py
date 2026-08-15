@@ -102,6 +102,11 @@ def test_friendly_names():
     assert "Nova" in friendly_model_name("us.amazon.nova-2-lite-v1:0")
 
 
+def test_tools_for_config_disabled_by_default():
+    tools = ai_tools.tools_for_config(False)
+    assert all(t["toolSpec"]["name"] not in ("get_fleet_status", "get_balloon") for t in tools)
+
+
 if __name__ == "__main__":
     tests = [
         test_no_nemotron_in_config,
@@ -111,6 +116,7 @@ if __name__ == "__main__":
         test_bare_location_heuristic,
         test_bedrock_unavailable_does_not_invent_fleet,
         test_friendly_names,
+        test_tools_for_config_disabled_by_default,
     ]
     failed = 0
     for t in tests:

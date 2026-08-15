@@ -305,3 +305,15 @@ BEDROCK_TOOLS = [
         }
     },
 ]
+
+
+def tools_for_config(balloons_enabled: bool = False) -> list:
+    """Exclude fleet tools when Treasure markers / fleet AI are disabled."""
+    if balloons_enabled:
+        return list(BEDROCK_TOOLS)
+    fleet_names = {"get_fleet_status", "get_balloon"}
+    return [
+        t
+        for t in BEDROCK_TOOLS
+        if t.get("toolSpec", {}).get("name") not in fleet_names
+    ]
