@@ -25,6 +25,50 @@ export interface BackendHealthStatus {
     message?: string;
 }
 
+/** Nominatim-style bounding box: [south, north, west, east] */
+export type GeoBBox = [number, number, number, number];
+
+export interface LocationFilter {
+    lat: number;
+    lon: number;
+    name: string;
+    bbox?: GeoBBox;
+}
+
+/**
+ * Balloons whose latest point falls in the place bounding box,
+ * or within `nearbyKm` of the center when the box is missing / empty.
+ */
+export function filterBalloonsNearLocation(
+    balloons: Balloon[],
+    location: LocationFilter,
+    nearbyKm = 250
+): Balloon[] {
+    const withPoints = balloons.filter((b) => b.latestPoint);
+
+    if (location.bbox) {
+        const [south, north, west, east] = location.bbox;
+        // Small padding so coastal / border craft are included
+        const padLat = Math.max((north - south) * 0.05, 0.3);
+        const padLon = Math.max((east - west) * 0.05, 0.3);
+        const inBox = withPoints.filter((b) => {
+            const p = b.latestPoint!;
+            return (
+                p.lat >= south - padLat &&
+                p.lat <= north + padLat &&
+                p.lon >= west - padLon &&
+                p.lon <= east + padLon
+            );
+        });
+        if (inBox.length > 0) return inBox;
+    }
+
+    return withPoints.filter((b) => {
+        const p = b.latestPoint!;
+        return calculateDistanceKm(location.lat, location.lon, p.lat, p.lon) <= nearbyKm;
+    });
+}
+
 /** Haversine formula to compute distance in km between two lat/lon points */
 export function calculateDistanceKm(lat1: number, lon1: number, lat2: number, lon2: number): number {
     const R = 6371; // Earth radius in km

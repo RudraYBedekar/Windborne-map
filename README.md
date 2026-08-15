@@ -22,7 +22,7 @@ Interactive MapLibre 3D globe for **WindBorne WeatherMesh** forecasts and **Vick
 | **Effects** | Rain / snow / wind particles driven by live weather |
 | **Fleet UI** | Treasure telemetry, 24h timeline, detail panel & export — **off by default** (feed not operationally accurate) |
 
-Balloon markers stay hidden unless you set `NEXT_PUBLIC_SHOW_BALLOONS=true` and `BALLOONS_ENABLED=true`.
+Balloon markers stay hidden globally unless you set `NEXT_PUBLIC_SHOW_BALLOONS=true`. Searching a place (e.g. California) shows **nearby Treasure balloons** in that region — click a marker for live status.
 
 ---
 

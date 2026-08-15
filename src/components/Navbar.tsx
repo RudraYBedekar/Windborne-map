@@ -10,13 +10,19 @@ interface SearchResult {
     lat: string;
     lon: string;
     display_name: string;
+    boundingbox?: string[];
 }
 
 interface NavbarProps {
     balloons: Balloon[];
     selectedId: string | null;
     onSelectBalloon: (id: string) => void;
-    onSelectLocation: (lat: number, lon: number, name: string) => void;
+    onSelectLocation: (
+        lat: number,
+        lon: number,
+        name: string,
+        bbox?: [number, number, number, number]
+    ) => void;
     lastUpdated: Date | null;
     loading: boolean;
     onRefresh: () => void;
@@ -172,7 +178,19 @@ export default function Navbar({
                                 <button
                                     key={r.place_id}
                                     onClick={() => {
-                                        onSelectLocation(parseFloat(r.lat), parseFloat(r.lon), r.display_name);
+                                        let bbox: [number, number, number, number] | undefined;
+                                        if (r.boundingbox && r.boundingbox.length === 4) {
+                                            const [south, north, west, east] = r.boundingbox.map(Number);
+                                            if ([south, north, west, east].every((n) => Number.isFinite(n))) {
+                                                bbox = [south, north, west, east];
+                                            }
+                                        }
+                                        onSelectLocation(
+                                            parseFloat(r.lat),
+                                            parseFloat(r.lon),
+                                            r.display_name,
+                                            bbox
+                                        );
                                         setShowSearchMenu(false);
                                     }}
                                     className="w-full text-left px-2.5 py-1.5 rounded hover:bg-slate-800/80 flex items-center gap-2 text-xs text-slate-300 transition-colors"

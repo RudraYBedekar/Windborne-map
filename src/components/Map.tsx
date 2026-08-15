@@ -4,7 +4,7 @@ import * as React from 'react';
 import Map, { Source, Layer, MapRef, MapLayerMouseEvent } from 'react-map-gl/maplibre';
 import type { Map as MaplibreMap } from 'maplibre-gl';
 import 'maplibre-gl/dist/maplibre-gl.css';
-import { Balloon } from '@/services/windborne';
+import { Balloon, LocationFilter } from '@/services/windborne';
 import { buildRadarTileUrl, fetchRainViewerMaps } from '@/services/rainviewer';
 import { getTerminatorGeoJSON } from '@/lib/sun';
 import {
@@ -22,8 +22,8 @@ interface MapComponentProps {
     balloons: Balloon[];
     selectedId: string | null;
     onSelectBalloon: (id: string | null) => void;
-  selectedLocation?: { lat: number; lon: number; name: string } | null;
-  onSelectLocation?: (loc: { lat: number; lon: number; name: string } | null) => void;
+  selectedLocation?: LocationFilter | null;
+  onSelectLocation?: (loc: LocationFilter | null) => void;
     autoRotate?: boolean;
   scrubTime?: number;
   trackSelected?: boolean;
@@ -255,18 +255,29 @@ export default function MapComponent({
     return () => cancelAnimationFrame(rotationFrame);
   }, [autoRotate]);
 
-  // Fly to selected city location when location is searched/selected
+  // Fly / fit to selected city or region
   React.useEffect(() => {
     if (selectedLocation && mapRef.current) {
-      mapRef.current.flyTo({
-        center: [selectedLocation.lon, selectedLocation.lat],
-        zoom: 7,
-        pitch: 45,
-        bearing: 0,
-        speed: 1.2,
-        curve: 1.4,
-        essential: true,
-      });
+      if (selectedLocation.bbox) {
+        const [south, north, west, east] = selectedLocation.bbox;
+        mapRef.current.fitBounds(
+          [
+            [west, south],
+            [east, north],
+          ],
+          { padding: 60, duration: 1600, maxZoom: 8, pitch: 35, bearing: 0 }
+        );
+      } else {
+        mapRef.current.flyTo({
+          center: [selectedLocation.lon, selectedLocation.lat],
+          zoom: 7,
+          pitch: 45,
+          bearing: 0,
+          speed: 1.2,
+          curve: 1.4,
+          essential: true,
+        });
+      }
     }
   }, [selectedLocation]);
 
@@ -398,8 +409,8 @@ export default function MapComponent({
       }
 
       if (balloonFeature?.properties?.id) {
+        // Keep regional location filter active so nearby balloons stay visible
         onSelectBalloon(String(balloonFeature.properties.id));
-        if (onSelectLocation) onSelectLocation(null);
         return;
       }
 
