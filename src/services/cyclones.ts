@@ -32,6 +32,22 @@ export interface CycloneDetailResponse {
   forecast_hour?: number;
   initialization_time?: string | null;
   cone_caption?: string;
+  basin_labels?: string[];
+  route_summary?: {
+    points: number;
+    status?: string;
+    note?: string;
+    start?: { lat?: number | null; lon?: number | null; valid_at?: string | null } | null;
+    end?: { lat?: number | null; lon?: number | null; valid_at?: string | null } | null;
+  } | null;
+  region?: {
+    ok?: boolean;
+    region_label?: string;
+    country?: string | null;
+    ocean_or_sea?: string | null;
+    display_name?: string;
+  } | null;
+  brief?: Record<string, unknown>;
   error?: string;
   message?: string;
 }

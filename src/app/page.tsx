@@ -64,6 +64,13 @@ export default function Home() {
   const [selectedCycloneId, setSelectedCycloneId] = useState<string | null>(null);
   const [selectedCyclone, setSelectedCyclone] = useState<CycloneDetail | null>(null);
   const [cyclonePoint, setCyclonePoint] = useState<Record<string, unknown> | null>(null);
+  const [cycloneBasinLabels, setCycloneBasinLabels] = useState<string[]>([]);
+  const [cycloneRouteSummary, setCycloneRouteSummary] = useState<
+    import('@/components/CycloneDetailPanel').CycloneRouteSummary | null
+  >(null);
+  const [cycloneRegion, setCycloneRegion] = useState<
+    import('@/components/CycloneDetailPanel').CycloneRegionInfo | null
+  >(null);
   const [cycloneInitTime, setCycloneInitTime] = useState<string | null>(null);
   const [cycloneForecastHour, setCycloneForecastHour] = useState(0);
   const [showEnsemble, setShowEnsemble] = useState(false);
@@ -273,6 +280,9 @@ export default function Home() {
     if (!selectedCycloneId || globeMode !== 'cyclones') {
       setSelectedCyclone(null);
       setCyclonePoint(null);
+      setCycloneBasinLabels([]);
+      setCycloneRouteSummary(null);
+      setCycloneRegion(null);
       return;
     }
     let cancelled = false;
@@ -284,6 +294,9 @@ export default function Home() {
       }
       setSelectedCyclone(res.cyclone);
       setCyclonePoint(res.point || null);
+      setCycloneBasinLabels(res.basin_labels || []);
+      setCycloneRouteSummary(res.route_summary || null);
+      setCycloneRegion(res.region || null);
       if (res.initialization_time) setCycloneInitTime(res.initialization_time);
     });
     return () => {
@@ -428,6 +441,9 @@ export default function Home() {
             forecastHour={cycloneForecastHour}
             point={cyclonePoint}
             initializationTime={cycloneInitTime}
+            basinLabels={cycloneBasinLabels}
+            routeSummary={cycloneRouteSummary}
+            region={cycloneRegion}
             onClose={() => setSelectedCycloneId(null)}
             className="!left-[316px] md:!left-[316px] max-md:!left-3 max-md:!top-[auto] max-md:!bottom-28"
           />

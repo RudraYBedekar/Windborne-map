@@ -256,17 +256,32 @@ class TropicalCycloneService:
 
     def point_at_hour(self, storm: Dict[str, Any], forecast_hour: int) -> Optional[Dict[str, Any]]:
         path = storm.get("path") or []
-        if not path:
-            return None
-        exact = [p for p in path if p.get("forecast_hour") == forecast_hour]
-        if exact:
-            return exact[0]
-        # nearest hour
-        ranked = sorted(
-            (p for p in path if isinstance(p.get("forecast_hour"), int)),
-            key=lambda p: abs(int(p["forecast_hour"]) - forecast_hour),
-        )
-        return ranked[0] if ranked else None
+        if path:
+            exact = [p for p in path if p.get("forecast_hour") == forecast_hour]
+            if exact:
+                return exact[0]
+            ranked = sorted(
+                (p for p in path if isinstance(p.get("forecast_hour"), int)),
+                key=lambda p: abs(int(p["forecast_hour"]) - forecast_hour),
+            )
+            if ranked:
+                return ranked[0]
+
+        # Early / sparse storms: WeatherMesh may only publish genesis (no mean track yet)
+        gen = storm.get("genesis") or {}
+        if isinstance(gen.get("longitude"), (int, float)) and isinstance(gen.get("latitude"), (int, float)):
+            return {
+                "valid_at": storm.get("start_time"),
+                "forecast_hour": None,
+                "latitude": gen.get("latitude"),
+                "longitude": gen.get("longitude"),
+                "max_wind_kt": storm.get("max_wind_kt"),
+                "min_mslp_hpa": storm.get("min_mslp_hpa"),
+                "storm_type": None,
+                "position_source": "genesis",
+                "track_status": "Track not yet published by WeatherMesh for this storm.",
+            }
+        return None
 
     def to_geojson(
         self,
@@ -339,6 +354,7 @@ class TropicalCycloneService:
                             "min_mslp_hpa": pt.get("min_mslp_hpa"),
                             "storm_type": pt.get("storm_type"),
                             "selected": cid == selected_id,
+                            "position_source": pt.get("position_source") or "path",
                         },
                         "geometry": {
                             "type": "Point",
@@ -347,28 +363,8 @@ class TropicalCycloneService:
                     }
                 )
             else:
-                gen = storm.get("genesis") or {}
-                if isinstance(gen.get("longitude"), (int, float)) and isinstance(gen.get("latitude"), (int, float)):
-                    features.append(
-                        {
-                            "type": "Feature",
-                            "properties": {
-                                "feature_type": "position",
-                                "tropical_cyclone_id": cid,
-                                "storm_name": name,
-                                "forecast_hour": None,
-                                "max_wind_kt": storm.get("max_wind_kt"),
-                                "min_mslp_hpa": storm.get("min_mslp_hpa"),
-                                "storm_type": None,
-                                "selected": cid == selected_id,
-                                "position_source": "genesis",
-                            },
-                            "geometry": {
-                                "type": "Point",
-                                "coordinates": [gen["longitude"], gen["latitude"]],
-                            },
-                        }
-                    )
+                # No usable position at all
+                pass
 
             # Optional: landfall points (not full ensemble paths — those need unofficial IDs)
             if include_ensemble:

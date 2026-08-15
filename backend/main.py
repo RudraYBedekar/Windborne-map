@@ -348,6 +348,18 @@ async def list_cyclones(
     return payload
 
 
+BASIN_LABELS = {
+    "NA": "North Atlantic",
+    "EP": "Eastern Pacific",
+    "CP": "Central Pacific",
+    "WP": "Western Pacific",
+    "NI": "North Indian",
+    "SI": "South Indian",
+    "SP": "South Pacific",
+    "AU": "Australia region",
+}
+
+
 @app.get("/api/cyclones/{cyclone_id}")
 async def get_cyclone(cyclone_id: str, forecast_hour: int = 0):
     payload = await cyclone_service.fetch_cyclones(include_details=True)
@@ -357,6 +369,43 @@ async def get_cyclone(cyclone_id: str, forecast_hour: int = 0):
     if not storm:
         raise HTTPException(status_code=404, detail={"error": "NOT_FOUND", "cyclone_id": cyclone_id})
     point = cyclone_service.point_at_hour(storm, forecast_hour)
+
+    path = storm.get("path") or []
+    route_summary = None
+    if len(path) >= 2:
+        first, last = path[0], path[-1]
+        route_summary = {
+            "points": len(path),
+            "start": {"lat": first.get("latitude"), "lon": first.get("longitude"), "valid_at": first.get("valid_at")},
+            "end": {"lat": last.get("latitude"), "lon": last.get("longitude"), "valid_at": last.get("valid_at")},
+            "status": "mean_track_available",
+        }
+    elif len(path) == 1:
+        only = path[0]
+        route_summary = {
+            "points": 1,
+            "start": {"lat": only.get("latitude"), "lon": only.get("longitude"), "valid_at": only.get("valid_at")},
+            "end": None,
+            "status": "single_point_only",
+        }
+    else:
+        route_summary = {
+            "points": 0,
+            "start": None,
+            "end": None,
+            "status": "no_track_yet",
+            "note": "WeatherMesh has not published a mean path for this storm yet (often early or weak systems). Genesis position may still be shown.",
+        }
+
+    basins = storm.get("basins") or []
+    basin_labels = [BASIN_LABELS.get(str(b).upper(), str(b)) for b in basins]
+
+    region = None
+    if point and isinstance(point.get("latitude"), (int, float)) and isinstance(point.get("longitude"), (int, float)):
+        from services import ai_tools as _ai_tools
+
+        region = await _ai_tools.reverse_geocode(float(point["latitude"]), float(point["longitude"]))
+
     return {
         "ok": True,
         "provider": payload.get("provider"),
@@ -367,6 +416,19 @@ async def get_cyclone(cyclone_id: str, forecast_hour: int = 0):
         "point": point,
         "cyclone": storm,
         "from_cache": payload.get("from_cache"),
+        "basin_labels": basin_labels,
+        "route_summary": route_summary,
+        "region": region,
+        "brief": {
+            "name": storm.get("storm_name") or storm.get("tropical_cyclone_id"),
+            "basins": basin_labels,
+            "track_available": len(path) >= 2,
+            "intensity_available": storm.get("max_wind_kt") is not None or (
+                point and point.get("max_wind_kt") is not None
+            ),
+            "news_note": "WeatherMesh does not provide news headlines. Region below is reverse-geocoded from the storm position.",
+            "hazards_note": "WindBorne tracks tropical cyclones and weather grids (incl. snowfall). It does not provide avalanche alerts.",
+        },
         "cone_caption": (
             "Forecast Cone — WeatherMesh ensemble-supported range of plausible cyclone positions. "
             "Not a guaranteed impact region."

@@ -21,8 +21,42 @@ def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
-async def search_location(query: str) -> Dict[str, Any]:
-    """Resolve a place name via OpenStreetMap Nominatim."""
+async def reverse_geocode(lat: float, lon: float) -> Dict[str, Any]:
+    """Nearest place / country for cyclone context (Nominatim). Not news."""
+    try:
+        url = "https://nominatim.openstreetmap.org/reverse"
+        params = {
+            "format": "json",
+            "lat": lat,
+            "lon": lon,
+            "zoom": 5,
+            "addressdetails": 1,
+        }
+        headers = {"User-Agent": "Windborne-VickyAI/1.0 (mission-ops)"}
+        async with httpx.AsyncClient(timeout=12.0) as client:
+            resp = await client.get(url, params=params, headers=headers)
+            if resp.status_code != 200:
+                return {"ok": False, "error": f"HTTP_{resp.status_code}"}
+            data = resp.json()
+            addr = data.get("address") or {}
+            country = addr.get("country")
+            ocean = addr.get("ocean") or addr.get("sea")
+            state = addr.get("state") or addr.get("region")
+            display = data.get("display_name")
+            region_bits = [b for b in (state, country or ocean) if b]
+            return {
+                "ok": True,
+                "display_name": display,
+                "country": country,
+                "ocean_or_sea": ocean,
+                "state": state,
+                "region_label": ", ".join(region_bits) if region_bits else (display or "Open ocean / remote area"),
+                "retrievedAt": _utc_now(),
+                "provider": "OpenStreetMap Nominatim",
+            }
+    except Exception as e:
+        logger.warning("[ai_tools] reverse_geocode error=%s", type(e).__name__)
+        return {"ok": False, "error": type(e).__name__, "message": str(e)}
     q = (query or "").strip()
     if not q:
         return {"ok": False, "error": "EMPTY_QUERY", "results": []}

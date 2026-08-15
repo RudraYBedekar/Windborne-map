@@ -112,6 +112,12 @@ def test_null_path_uses_genesis_in_geojson():
     assert positions[0]["properties"].get("position_source") == "genesis"
     assert positions[0]["geometry"]["coordinates"] == [-110.0, 15.0]
 
+    storm = svc.get_storm(payload, "CP012026")
+    pt = svc.point_at_hour(storm, 0)
+    assert pt is not None
+    assert pt["position_source"] == "genesis"
+    assert pt["latitude"] == 15.0
+
 
 def test_geojson_includes_path_cone_and_ensemble_landfalls():
     svc = TropicalCycloneService()
