@@ -9,7 +9,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
 
-from services.wb_gate import wb_fetch_gate
+from services.wb_gate import RateLimitedFetch, wb_fetch_gate
 
 logger = logging.getLogger("cyclones_service")
 
@@ -98,6 +98,8 @@ class TropicalCycloneService:
             params["basin"] = basin
 
         cache_key = f"tc:{self.model}:{include_details}:{include_unofficial_ids}:{basin or 'ALL'}"
+        # Keep cyclone payloads warm longer than the rate window so chat stays instant.
+        cache_ttl = max(wb_fetch_gate.min_interval, float(os.getenv("CYCLONE_CACHE_TTL_SEC", "900") or "900"))
 
         async def fetcher():
             url = f"{self.base_url}/forecasts/v1/{self.model}/tropical_cyclones"
@@ -117,9 +119,26 @@ class TropicalCycloneService:
             return data
 
         try:
-            raw, from_cache = await wb_fetch_gate.run(cache_key, fetcher, force=force)
+            raw, from_cache = await wb_fetch_gate.run(cache_key, fetcher, force=force, ttl=cache_ttl)
+        except RateLimitedFetch as e:
+            stale = wb_fetch_gate.stale_get(cache_key)
+            if stale is not None:
+                return self._normalize_payload(
+                    stale,
+                    from_cache=True,
+                    warning=f"Serving cached cyclones; next upstream refresh in {e.retry_after:.0f}s.",
+                )
+            return {
+                "ok": False,
+                "error": "RATE_GATED",
+                "message": str(e),
+                "retry_after_seconds": e.retry_after,
+                "tropical_cyclones": {},
+                "total": 0,
+                "retrievedAt": _utc_now(),
+            }
         except Exception as e:
-            cached = wb_fetch_gate.cache_get(cache_key)
+            cached = wb_fetch_gate.cache_get(cache_key) or wb_fetch_gate.stale_get(cache_key)
             if cached is not None:
                 return self._normalize_payload(cached, from_cache=True, warning=str(e))
             return {

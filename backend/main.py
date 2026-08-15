@@ -139,7 +139,25 @@ async def lifespan(app: FastAPI):
     owm_tiles.set_http_client(http_client)
     cyclone_service.set_http_client(http_client)
     gridded_service.set_http_client(http_client)
+
+    async def _warm_cyclone_cache():
+        """Prefetch cyclones in the background so Vicky answers instantly from cache."""
+        await asyncio.sleep(2)
+        while True:
+            try:
+                await cyclone_service.fetch_cyclones(include_details=True)
+            except Exception:
+                pass
+            # Refresh on the same cadence as the upstream gate (default 5 min)
+            await asyncio.sleep(max(60.0, wb_fetch_gate.min_interval))
+
+    warm_task = asyncio.create_task(_warm_cyclone_cache())
     yield
+    warm_task.cancel()
+    try:
+        await warm_task
+    except asyncio.CancelledError:
+        pass
     await http_client.aclose()
     http_client = None
 

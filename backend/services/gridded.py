@@ -15,7 +15,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
 
-from services.wb_gate import wb_fetch_gate
+from services.wb_gate import RateLimitedFetch, wb_fetch_gate
 
 logger = logging.getLogger("gridded_service")
 
@@ -155,6 +155,25 @@ class GriddedForecastService:
                 "sfc_variables": sfc,
                 "precip_variable": self.precip_variable,
                 "retrievedAt": _utc_now(),
+            }
+        except RateLimitedFetch as e:
+            stale = wb_fetch_gate.stale_get(cache_key)
+            if isinstance(stale, dict):
+                self._variables_cache = stale
+                return {
+                    "ok": True,
+                    "from_cache": True,
+                    "sfc_variables": stale.get("sfc_variables") or [],
+                    "precip_variable": self.precip_variable,
+                    "warning": str(e),
+                    "retrievedAt": _utc_now(),
+                }
+            return {
+                "ok": False,
+                "error": "RATE_GATED",
+                "message": str(e),
+                "retry_after_seconds": e.retry_after,
+                "variables": [],
             }
         except Exception as e:
             self.last_error = str(e)
@@ -320,7 +339,13 @@ class GriddedForecastService:
                 v_bytes = await self._download_variable_bytes("wind_v_10m", valid_time)
                 return {"u": u_bytes, "v": v_bytes, "valid_time": valid_time}
 
-            raw, from_cache = await wb_fetch_gate.run(cache_key, fetcher_speed)
+            try:
+                raw, from_cache = await wb_fetch_gate.run(cache_key, fetcher_speed)
+            except RateLimitedFetch as e:
+                stale = wb_fetch_gate.stale_get(cache_key)
+                if stale is None:
+                    raise RuntimeError(str(e)) from e
+                raw, from_cache = stale, True
             u = self._netcdf_bytes_to_subset(raw["u"], west, south, east, north)
             v = self._netcdf_bytes_to_subset(raw["v"], west, south, east, north)
             speed = np.sqrt(np.asarray(u, dtype=float) ** 2 + np.asarray(v, dtype=float) ** 2)
@@ -340,7 +365,13 @@ class GriddedForecastService:
             content = await self._download_variable_bytes(variable, valid_time)
             return {"bytes": content, "valid_time": valid_time}
 
-        raw, from_cache = await wb_fetch_gate.run(cache_key, fetcher)
+        try:
+            raw, from_cache = await wb_fetch_gate.run(cache_key, fetcher)
+        except RateLimitedFetch as e:
+            stale = wb_fetch_gate.stale_get(cache_key)
+            if stale is None:
+                raise RuntimeError(str(e)) from e
+            raw, from_cache = stale, True
         arr = self._netcdf_bytes_to_subset(raw["bytes"], west, south, east, north)
         meta = {
             "valid_time": raw.get("valid_time"),

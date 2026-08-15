@@ -156,7 +156,39 @@ def test_wb_gate_serves_cache_without_second_fetch():
     asyncio.run(run())
 
 
-def test_wb_gate_waits_min_interval_on_miss():
+def test_wb_gate_returns_stale_instead_of_sleeping():
+    from services.wb_gate import RateLimitedFetch
+
+    gate = WindBorneFetchGate(min_interval_seconds=300)
+    calls = {"n": 0}
+
+    async def fetcher():
+        calls["n"] += 1
+        return {"n": calls["n"]}
+
+    async def run():
+        await gate.run("a", fetcher)
+        t0 = time.monotonic()
+        # Different key while rate window closed → stale miss → raise quickly (no sleep)
+        try:
+            await gate.run("b", fetcher)
+            assert False, "expected RateLimitedFetch"
+        except RateLimitedFetch as e:
+            assert e.retry_after > 0
+        assert time.monotonic() - t0 < 1.0
+        assert calls["n"] == 1
+
+        # After caching key b via force, later gated miss returns stale
+        await gate.run("b", fetcher, force=True)
+        assert calls["n"] == 2
+        out, from_cache = await gate.run("b", fetcher)
+        assert from_cache is True
+        assert out["n"] == 2
+
+    asyncio.run(run())
+
+
+def test_wb_gate_block_true_waits_min_interval():
     gate = WindBorneFetchGate(min_interval_seconds=0.15)
     calls = {"n": 0}
 
@@ -167,7 +199,7 @@ def test_wb_gate_waits_min_interval_on_miss():
     async def run():
         await gate.run("a", fetcher)
         t0 = time.monotonic()
-        await gate.run("b", fetcher)  # different key → must wait
+        await gate.run("b", fetcher, block=True)
         elapsed = time.monotonic() - t0
         assert calls["n"] == 2
         assert elapsed >= 0.12
