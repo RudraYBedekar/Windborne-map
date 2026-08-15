@@ -208,10 +208,17 @@ def test_rank_uses_viewport_when_region_missing():
             )
 
     async def fake_rev(lat, lon):
-        return {"ok": True, "region_label": f"Place {lat:.0f},{lon:.0f}", "display_name": "x"}
+        return {
+            "ok": True,
+            "is_city": True,
+            "city": f"City{int(lat)}",
+            "state": "Colorado",
+            "country": "United States",
+            "location": f"City{int(lat)}, Colorado",
+        }
 
-    orig = ai_tools.reverse_geocode
-    ai_tools.reverse_geocode = fake_rev  # type: ignore[assignment]
+    orig = ai_tools.reverse_geocode_city
+    ai_tools.reverse_geocode_city = fake_rev  # type: ignore[assignment]
     try:
         svc = ForecastRankService(DummyGridded())  # type: ignore[arg-type]
 
@@ -227,18 +234,79 @@ def test_rank_uses_viewport_when_region_missing():
             assert out["region"]["used"] == "current_map_view"
             assert len(out["locations"]) == 2
             assert out["locations"][0]["value"] == 12.5
+            assert "City" in out["locations"][0]["location"]
             assert out["variable"] == "snowfall_3h"
 
         asyncio.run(run())
     finally:
-        ai_tools.reverse_geocode = orig  # type: ignore[assignment]
+        ai_tools.reverse_geocode_city = orig  # type: ignore[assignment]
 
 
 def test_named_regions_resolve():
     us = resolve_named_region("US")
     assert us and us["kind"] == "named"
-    assert us["bbox"][0] == -125.0
+    assert us["bbox"][0] == -124.2
     assert resolve_named_region("current_map_view")["kind"] == "viewport"
+
+
+def test_rank_skips_ocean_keeps_cities():
+    class DummyGridded:
+        model = "wm-6"
+
+        async def rank_extrema(self, **kwargs):
+            return (
+                [
+                    {"latitude": 39.75, "longitude": -125.0, "value": 12.0},
+                    {"latitude": 39.74, "longitude": -104.99, "value": 11.0},
+                    {"latitude": 34.05, "longitude": -118.24, "value": 10.5},
+                ],
+                {
+                    "variable": "wind_speed_10m",
+                    "valid_time": "2026-08-16T00:00:00Z",
+                    "initialization_time": "2026-08-15T00:00:00Z",
+                    "from_cache": True,
+                },
+            )
+
+    async def fake_city(lat, lon):
+        if lon <= -124.5:
+            return {"ok": True, "is_city": False, "reason": "ocean_or_water"}
+        if abs(lat - 39.74) < 0.1:
+            return {
+                "ok": True,
+                "is_city": True,
+                "city": "Denver",
+                "state": "Colorado",
+                "country": "United States",
+                "location": "Denver, Colorado",
+            }
+        return {
+            "ok": True,
+            "is_city": True,
+            "city": "Los Angeles",
+            "state": "California",
+            "country": "United States",
+            "location": "Los Angeles, California",
+        }
+
+    orig = ai_tools.reverse_geocode_city
+    ai_tools.reverse_geocode_city = fake_city  # type: ignore[assignment]
+    try:
+        svc = ForecastRankService(DummyGridded())  # type: ignore[arg-type]
+
+        async def run():
+            out = await svc.rank_locations(
+                metric="wind_speed", region="us", limit=5, forecast_window_hours=24
+            )
+            assert out["ok"] is True
+            assert len(out["locations"]) == 2
+            assert out["locations"][0]["location"] == "Denver, Colorado"
+            assert out["locations"][1]["location"] == "Los Angeles, California"
+            assert out["skipped_non_city"] == 1
+
+        asyncio.run(run())
+    finally:
+        ai_tools.reverse_geocode_city = orig  # type: ignore[assignment]
 
 
 def test_bedrock_routes_forecast_not_list(monkeypatch):

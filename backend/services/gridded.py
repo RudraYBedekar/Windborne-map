@@ -508,6 +508,7 @@ class GriddedForecastService:
         forecast_hour: int = 24,
         limit: int = 5,
         maximize: bool = True,
+        min_separation_deg: float = 2.0,
     ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
         """Deterministic top-N grid extrema with spatial separation."""
         import numpy as np
@@ -515,7 +516,7 @@ class GriddedForecastService:
         if not self.enabled:
             raise PermissionError("Gridded forecasts disabled")
         if not self._deps_ready():
-            raise RuntimeError("Missing Python deps: xarray, numpy, pillow")
+            raise RuntimeError("Missing Python deps: xarray, numpy, pillow, h5netcdf")
 
         west, south, east, north = parse_bbox(bbox)
         var = self.resolve_variable(variable)
@@ -573,8 +574,7 @@ class GriddedForecastService:
         if not np.any(finite):
             raise RuntimeError("No finite values in region for ranking")
 
-        # Min separation ~2° to avoid clustered neighbors
-        min_sep = 2.0
+        min_sep = float(min_separation_deg)
         order = np.argsort(flat)[::-1] if maximize else np.argsort(flat)
         picked: List[Dict[str, Any]] = []
         for idx in order:

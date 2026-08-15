@@ -59,6 +59,75 @@ async def reverse_geocode(lat: float, lon: float) -> Dict[str, Any]:
         return {"ok": False, "error": type(e).__name__, "message": str(e)}
 
 
+async def reverse_geocode_city(lat: float, lon: float) -> Dict[str, Any]:
+    """Resolve a grid point to a city/town name. Rejects ocean / uninhabited water."""
+    try:
+        url = "https://nominatim.openstreetmap.org/reverse"
+        params = {
+            "format": "json",
+            "lat": lat,
+            "lon": lon,
+            "zoom": 10,
+            "addressdetails": 1,
+        }
+        headers = {"User-Agent": "Windborne-VickyAI/1.0 (mission-ops)"}
+        async with httpx.AsyncClient(timeout=12.0) as client:
+            resp = await client.get(url, params=params, headers=headers)
+            if resp.status_code != 200:
+                return {"ok": False, "is_city": False, "error": f"HTTP_{resp.status_code}"}
+            data = resp.json()
+            addr = data.get("address") or {}
+            if addr.get("ocean") or addr.get("sea") or addr.get("water"):
+                return {
+                    "ok": True,
+                    "is_city": False,
+                    "reason": "ocean_or_water",
+                    "retrievedAt": _utc_now(),
+                }
+            city = (
+                addr.get("city")
+                or addr.get("town")
+                or addr.get("village")
+                or addr.get("municipality")
+                or addr.get("city_district")
+                or addr.get("suburb")
+                or addr.get("hamlet")
+                or addr.get("county")
+            )
+            state = addr.get("state") or addr.get("region")
+            country = addr.get("country")
+            if not city:
+                return {
+                    "ok": True,
+                    "is_city": False,
+                    "reason": "no_settlement",
+                    "country": country,
+                    "state": state,
+                    "retrievedAt": _utc_now(),
+                }
+            # Prefer "City, State" for US-style labels; else "City, Country"
+            if state and country in (None, "United States", "United States of America", "Canada", "Mexico"):
+                label = f"{city}, {state}"
+            elif country:
+                label = f"{city}, {country}"
+            else:
+                label = city
+            return {
+                "ok": True,
+                "is_city": True,
+                "city": city,
+                "state": state,
+                "country": country,
+                "location": label,
+                "display_name": data.get("display_name"),
+                "retrievedAt": _utc_now(),
+                "provider": "OpenStreetMap Nominatim",
+            }
+    except Exception as e:
+        logger.warning("[ai_tools] reverse_geocode_city error=%s", type(e).__name__)
+        return {"ok": False, "is_city": False, "error": type(e).__name__, "message": str(e)}
+
+
 async def search_location(query: str) -> Dict[str, Any]:
     """Resolve a place name via OpenStreetMap Nominatim."""
     q = (query or "").strip()

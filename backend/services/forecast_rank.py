@@ -15,19 +15,19 @@ from services.gridded import FORECAST_HOURS, GriddedForecastService, parse_bbox
 
 logger = logging.getLogger("forecast_rank")
 
-# Named regions — sized to stay within gridded bbox safety limits where possible.
+# Named regions — inland-leaning boxes so ocean edges don't dominate ranking.
 NAMED_REGIONS: Dict[str, Tuple[float, float, float, float]] = {
     # west, south, east, north
-    "us": (-125.0, 24.0, -66.0, 50.0),
-    "usa": (-125.0, 24.0, -66.0, 50.0),
-    "united states": (-125.0, 24.0, -66.0, 50.0),
-    "conus": (-125.0, 24.0, -66.0, 50.0),
-    "north america": (-130.0, 25.0, -60.0, 55.0),  # CONUS-centric slice (trial-safe)
-    "na": (-130.0, 25.0, -60.0, 55.0),
-    "europe": (-10.0, 36.0, 30.0, 60.0),
-    "eu": (-10.0, 36.0, 30.0, 60.0),
-    "asia": (100.0, 20.0, 145.0, 50.0),  # East Asia slice (full Asia too large for one fetch)
-    "east asia": (100.0, 20.0, 145.0, 50.0),
+    "us": (-124.2, 25.0, -67.0, 49.0),
+    "usa": (-124.2, 25.0, -67.0, 49.0),
+    "united states": (-124.2, 25.0, -67.0, 49.0),
+    "conus": (-124.2, 25.0, -67.0, 49.0),
+    "north america": (-124.0, 26.0, -70.0, 52.0),
+    "na": (-124.0, 26.0, -70.0, 52.0),
+    "europe": (-9.0, 37.0, 28.0, 59.0),
+    "eu": (-9.0, 37.0, 28.0, 59.0),
+    "asia": (102.0, 22.0, 142.0, 48.0),
+    "east asia": (102.0, 22.0, 142.0, 48.0),
 }
 
 METRIC_ALIASES = {
@@ -304,12 +304,14 @@ class ForecastRankService:
                 return {"ok": False, "error": "VALIDATION", "message": str(e)}
 
         try:
+            # Over-fetch so we can drop ocean / non-city points after geocoding
             ranked, meta = await self.gridded.rank_extrema(
                 variable=spec["variable"],
                 bbox=bbox_str,
                 forecast_hour=hour,
-                limit=limit,
+                limit=max(limit * 12, 24),
                 maximize=spec["maximize"],
+                min_separation_deg=1.2,
             )
         except Exception as e:
             msg = str(e)
@@ -335,15 +337,27 @@ class ForecastRankService:
             }
 
         locations: List[Dict[str, Any]] = []
-        for i, row in enumerate(ranked, start=1):
+        seen_cities: set[str] = set()
+        skipped_non_city = 0
+        for row in ranked:
+            if len(locations) >= limit:
+                break
             lat, lon, value = row["latitude"], row["longitude"], row["value"]
-            place = await ai_tools.reverse_geocode(lat, lon)
+            place = await ai_tools.reverse_geocode_city(lat, lon)
+            if not place.get("is_city"):
+                skipped_non_city += 1
+                continue
+            label = place.get("location") or place.get("city")
+            key = (label or "").lower()
+            if not label or key in seen_cities:
+                continue
+            seen_cities.add(key)
             locations.append(
                 {
-                    "rank": i,
-                    "location": place.get("region_label")
-                    or place.get("display_name")
-                    or f"{lat:.2f}°, {lon:.2f}°",
+                    "rank": len(locations) + 1,
+                    "location": label,
+                    "city": place.get("city"),
+                    "state": place.get("state"),
                     "latitude": lat,
                     "longitude": lon,
                     "value": value,
@@ -351,6 +365,23 @@ class ForecastRankService:
                     "country": place.get("country"),
                 }
             )
+
+        if not locations:
+            return {
+                "ok": False,
+                "error": "NO_CITY_MATCHES",
+                "message": (
+                    "WeatherMesh extremes in this region were mostly over water or remote land. "
+                    "I could not resolve enough named cities. Try a smaller region or current map view."
+                ),
+                "skipped_non_city": skipped_non_city,
+            }
+
+        note_bits = [
+            "Showing named cities only (ocean / remote grid points excluded).",
+        ]
+        if spec.get("limitation"):
+            note_bits.insert(0, spec["limitation"])
 
         return {
             "ok": True,
@@ -365,8 +396,9 @@ class ForecastRankService:
             "initialization_time": meta.get("initialization_time"),
             "bbox": {"west": west, "south": south, "east": east, "north": north},
             "region": region_meta,
-            "limitation": spec.get("limitation"),
+            "limitation": " ".join(note_bits),
             "locations": locations,
+            "skipped_non_city": skipped_non_city,
             "provider": "WindBorne WeatherMesh",
             "model": self.gridded.model,
             "from_cache": meta.get("from_cache"),
