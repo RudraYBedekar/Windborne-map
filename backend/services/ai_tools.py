@@ -57,6 +57,10 @@ async def reverse_geocode(lat: float, lon: float) -> Dict[str, Any]:
     except Exception as e:
         logger.warning("[ai_tools] reverse_geocode error=%s", type(e).__name__)
         return {"ok": False, "error": type(e).__name__, "message": str(e)}
+
+
+async def search_location(query: str) -> Dict[str, Any]:
+    """Resolve a place name via OpenStreetMap Nominatim."""
     q = (query or "").strip()
     if not q:
         return {"ok": False, "error": "EMPTY_QUERY", "results": []}
