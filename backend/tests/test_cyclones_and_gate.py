@@ -182,8 +182,8 @@ def test_subset_bbox_handles_shuffled_longitude_index():
     assert set(np.round(out_lons, 1)).issubset({-100.0, -120.0, -80.0, -90.0, -70.0})
 
 
-def test_wb_gate_serves_cache_without_second_fetch():
-    gate = WindBorneFetchGate(min_interval_seconds=300)
+def test_wb_gate_serves_cache_without_second_fetch(tmp_path):
+    gate = WindBorneFetchGate(min_interval_seconds=300, disk_dir=tmp_path)
     calls = {"n": 0}
 
     async def fetcher():
@@ -201,10 +201,10 @@ def test_wb_gate_serves_cache_without_second_fetch():
     asyncio.run(run())
 
 
-def test_wb_gate_returns_stale_instead_of_sleeping():
+def test_wb_gate_returns_stale_instead_of_sleeping(tmp_path):
     from services.wb_gate import RateLimitedFetch
 
-    gate = WindBorneFetchGate(min_interval_seconds=300)
+    gate = WindBorneFetchGate(min_interval_seconds=300, disk_dir=tmp_path)
     calls = {"n": 0}
 
     async def fetcher():
@@ -233,8 +233,8 @@ def test_wb_gate_returns_stale_instead_of_sleeping():
     asyncio.run(run())
 
 
-def test_wb_gate_reuses_related_family_stale():
-    gate = WindBorneFetchGate(min_interval_seconds=300)
+def test_wb_gate_reuses_related_family_stale(tmp_path):
+    gate = WindBorneFetchGate(min_interval_seconds=300, disk_dir=tmp_path)
     calls = {"n": 0}
 
     async def fetcher():
@@ -255,8 +255,45 @@ def test_wb_gate_reuses_related_family_stale():
     asyncio.run(run())
 
 
-def test_wb_gate_block_true_waits_min_interval():
-    gate = WindBorneFetchGate(min_interval_seconds=0.15)
+def test_wb_gate_persists_to_disk_across_instances(tmp_path):
+    """Saved snapshots survive process restart (new gate instance, same disk dir)."""
+    calls = {"n": 0}
+
+    async def fetcher():
+        calls["n"] += 1
+        return {"bytes": b"precip", "valid_time": "t1"}
+
+    async def run():
+        g1 = WindBorneFetchGate(min_interval_seconds=300, disk_dir=tmp_path)
+        await g1.run("grid:wm-6:precipitation:2026-08-15T00:00:00Z", fetcher)
+        assert calls["n"] == 1
+
+        g2 = WindBorneFetchGate(min_interval_seconds=300, disk_dir=tmp_path)
+        # Simulate still inside rate window
+        g2._last_fetch_at = time.time()
+        out, from_cache = await g2.run(
+            "grid:wm-6:precipitation:2026-08-16T00:00:00Z", fetcher
+        )
+        assert from_cache is True
+        assert out["bytes"] == b"precip"
+        assert calls["n"] == 1  # no second upstream fetch
+
+    asyncio.run(run())
+
+
+def test_rank_intent_rejects_world_as_need_region():
+    from services.forecast_rank import parse_rank_intent
+
+    intent = parse_rank_intent(
+        "Show me the 5 locations with the strongest winds in the world over the next 24 hours."
+    )
+    assert intent is not None
+    assert intent["world"] is True
+    assert intent["region"] is None
+
+
+def test_wb_gate_block_true_waits_min_interval(tmp_path):
+    gate = WindBorneFetchGate(min_interval_seconds=0.15, disk_dir=tmp_path)
     calls = {"n": 0}
 
     async def fetcher():

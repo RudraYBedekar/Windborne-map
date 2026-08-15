@@ -278,6 +278,7 @@ class BedrockChatService:
                     limit=int(tool_input.get("limit") or 5),
                     map_bounds=self._map_bounds,
                     selected_location=self._selected_location,
+                    world=bool(tool_input.get("world")),
                 )
         elif name == "get_gridded_forecast_summary":
             if not self.gridded_service or not self.gridded_enabled:
@@ -458,6 +459,7 @@ class BedrockChatService:
             "region": intent.get("region"),
             "forecast_window_hours": intent.get("forecast_window_hours", 24),
             "limit": intent.get("limit", 5),
+            "world": bool(intent.get("world")),
         }
         tool_result = await self._execute_tool("rank_forecast_locations", tool_input)
         actions: List[Dict[str, Any]] = []

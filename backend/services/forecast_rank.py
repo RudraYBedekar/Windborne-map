@@ -156,11 +156,18 @@ def parse_rank_intent(text: str) -> Optional[Dict[str, Any]]:
     if "map view" in q or "this view" in q or "current view" in q or "in this view" in q:
         region = "current_map_view"
 
+    world = bool(
+        re.search(r"\b(world|global|planet|everywhere|entire world|whole world)\b", q)
+    )
+    if world:
+        region = None
+
     return {
         "metric": metric,
         "region": region,
         "forecast_window_hours": hours,
         "limit": limit,
+        "world": world,
     }
 
 
@@ -230,11 +237,24 @@ class ForecastRankService:
         limit: int = 5,
         map_bounds: Optional[Dict[str, float]] = None,
         selected_location: Optional[Dict[str, Any]] = None,
+        world: bool = False,
     ) -> Dict[str, Any]:
         try:
             spec = self._metric_to_variable(metric)
         except ValueError as e:
             return {"ok": False, "error": "UNSUPPORTED_METRIC", "message": str(e)}
+
+        if world:
+            return {
+                "ok": False,
+                "error": "NEED_REGION",
+                "ask_region": True,
+                "message": (
+                    "Full-world ranking isn't available on the WeatherMesh trial "
+                    "(the global grid is too large). "
+                    "Which region should I check: US, North America, Europe, or Asia?"
+                ),
+            }
 
         hour = self._pick_forecast_hour(forecast_window_hours)
         limit = max(1, min(int(limit), 10))
@@ -287,6 +307,26 @@ class ForecastRankService:
                 "ask_region": True,
             }
 
+        # Replay last successful ranking for same metric/region/hour if rate-gated later
+        from services.wb_gate import wb_fetch_gate
+
+        result_cache_key = (
+            f"rank:{metric}:{region_meta.get('used') or region or 'map'}:"
+            f"{forecast_window_hours}:{limit}:{bbox_str}"
+        )
+        cached_rank = wb_fetch_gate.stale_get(result_cache_key)
+        if (
+            isinstance(cached_rank, dict)
+            and cached_rank.get("ok")
+            and wb_fetch_gate.seconds_until_allowed() > 0
+        ):
+            out = dict(cached_rank)
+            out["from_cache"] = True
+            lim = out.get("limitation") or ""
+            note = "Replaying saved ranking snapshot (WeatherMesh rate window active)."
+            out["limitation"] = f"{lim} {note}".strip() if lim else note
+            return out
+
         try:
             west, south, east, north = parse_bbox(bbox_str)
         except ValueError as e:
@@ -309,9 +349,9 @@ class ForecastRankService:
                 variable=spec["variable"],
                 bbox=bbox_str,
                 forecast_hour=hour,
-                limit=max(limit * 12, 24),
+                limit=max(limit * 16, 32),
                 maximize=spec["maximize"],
-                min_separation_deg=1.2,
+                min_separation_deg=1.0,
             )
         except Exception as e:
             msg = str(e)
@@ -329,6 +369,36 @@ class ForecastRankService:
                     ),
                     "metric": metric,
                     "suggested_metrics": ["precipitation", "wind_speed"],
+                }
+            # Rate gate with no snapshot for THIS variable — point at what is saved
+            if "rate" in msg.lower() or "snapshot" in msg.lower() or "rate-limited" in msg.lower():
+                families = wb_fetch_gate.list_cached_families()
+                saved = []
+                if any("wind" in f for f in families):
+                    saved.append("wind")
+                if any("temperature" in f for f in families):
+                    saved.append("temperature")
+                if any("precip" in f or "rain" in f or "total_precipitation" in f for f in families):
+                    saved.append("precipitation")
+                if any("snowfall" in f for f in families):
+                    saved.append("snowfall")
+                if any(f.startswith("tc:") for f in families):
+                    saved.append("cyclones")
+                offer = (
+                    f" I do have a saved snapshot for: {', '.join(saved)}."
+                    if saved
+                    else ""
+                )
+                return {
+                    "ok": False,
+                    "error": "RATE_GATED",
+                    "message": (
+                        msg
+                        + offer
+                        + " Ask for a saved metric now, or retry this one after the rate window."
+                    ),
+                    "cached_families": families,
+                    "ask_region": False,
                 }
             return {
                 "ok": False,
@@ -372,7 +442,7 @@ class ForecastRankService:
                 "error": "NO_CITY_MATCHES",
                 "message": (
                     "WeatherMesh extremes in this region were mostly over water or remote land. "
-                    "I could not resolve enough named cities. Try a smaller region or current map view."
+                    "I could not resolve enough named cities. Try US, Europe, Asia, or your current map view."
                 ),
                 "skipped_non_city": skipped_non_city,
             }
@@ -387,7 +457,7 @@ class ForecastRankService:
         if spec.get("limitation"):
             note_bits.insert(0, spec["limitation"])
 
-        return {
+        out = {
             "ok": True,
             "metric": metric,
             "variable": meta.get("variable") or spec["variable"],
@@ -407,3 +477,9 @@ class ForecastRankService:
             "model": self.gridded.model,
             "from_cache": meta.get("from_cache"),
         }
+        # Persist ranked answer so the same question works during the rate window / after restart
+        try:
+            wb_fetch_gate.cache_set(result_cache_key, out, ttl=wb_fetch_gate.stale_ttl)
+        except Exception:
+            pass
+        return out
