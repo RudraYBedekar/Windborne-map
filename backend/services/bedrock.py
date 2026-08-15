@@ -50,6 +50,13 @@ Bare place names (e.g. "fairfax") are LOCATION_SEARCH. Use search_location.
 After resolving, ask whether the user wants weather, balloons nearby, or a globe fly-to —
 do NOT dump unrelated fleet statistics.
 
+## Tropical cyclones / gridded forecasts
+Use list_tropical_cyclones, get_tropical_cyclone, get_cyclone_forecast for storm questions.
+Use get_gridded_forecast_summary for regional grid statistics.
+Never invent cyclone position, intensity, landfall, track, cone, or grid values.
+If a field is null, say it is unavailable from WeatherMesh.
+Forecast Cone = ensemble-supported range of plausible positions — NOT a guaranteed impact region.
+
 ## Conceptual knowledge
 You MAY explain general concepts (what pressure means, what a stratospheric balloon is, solar terminator)
 without tools. Operational claims always need tools.
@@ -61,9 +68,11 @@ When tools return numbers, quote those exact numbers — do not alter them.
 
 
 class BedrockChatService:
-    def __init__(self, weather_client=None, telemetry_loader=None):
+    def __init__(self, weather_client=None, telemetry_loader=None, cyclone_service=None, gridded_service=None):
         self.weather_client = weather_client
         self.telemetry_loader = telemetry_loader  # async callable -> list[balloon]
+        self.cyclone_service = cyclone_service
+        self.gridded_service = gridded_service
         self.client = None
         self.last_error: Optional[str] = None
         self._refresh_config()
@@ -78,6 +87,8 @@ class BedrockChatService:
         self.display_name = cfg["AI_MODEL_DISPLAY_NAME"]
         self.provider_name = cfg["AI_PROVIDER"]
         self.balloons_enabled = cfg["BALLOONS_ENABLED"]
+        self.cyclones_enabled = cfg.get("CYCLONES_ENABLED", True)
+        self.gridded_enabled = cfg.get("GRIDDED_FORECASTS_ENABLED", True)
 
     def _init_client(self):
         try:
@@ -135,6 +146,8 @@ class BedrockChatService:
             "auth_method": "Explicit API Keys" if has_keys else "IAM Role / Default Credential Chain",
             "last_error": self.last_error,
             "balloons_enabled": self.balloons_enabled,
+            "cyclones_enabled": self.cyclones_enabled,
+            "gridded_enabled": self.gridded_enabled,
             "fallback_available": False,  # no inventing local engine
             "grounded": True,
         }
@@ -170,6 +183,96 @@ class BedrockChatService:
         elif name == "get_balloon":
             balloons = await self._load_balloons()
             out = ai_tools.find_balloon(balloons, tool_input.get("balloon_id", ""))
+        elif name == "list_tropical_cyclones":
+            if not self.cyclone_service or not self.cyclones_enabled:
+                out = {"ok": False, "error": "CYCLONES_UNAVAILABLE"}
+            else:
+                payload = await self.cyclone_service.fetch_cyclones(include_details=True)
+                if not payload.get("ok"):
+                    out = payload
+                else:
+                    storms = []
+                    for cid, s in (payload.get("tropical_cyclones") or {}).items():
+                        storms.append(
+                            {
+                                "tropical_cyclone_id": cid,
+                                "storm_name": s.get("storm_name"),
+                                "basins": s.get("basins"),
+                                "max_wind_kt": s.get("max_wind_kt"),
+                                "min_mslp_hpa": s.get("min_mslp_hpa"),
+                                "start_time": s.get("start_time"),
+                                "end_time": s.get("end_time"),
+                                "path_points": len(s.get("path") or []),
+                                "has_cone": bool(s.get("cone") and s["cone"].get("geometry")),
+                                "landfall_count": len(s.get("landfalls") or []),
+                            }
+                        )
+                    # strongest by max_wind_kt when available
+                    ranked = [s for s in storms if isinstance(s.get("max_wind_kt"), (int, float))]
+                    strongest = max(ranked, key=lambda s: s["max_wind_kt"]) if ranked else None
+                    out = {
+                        "ok": True,
+                        "initialization_time": payload.get("initialization_time"),
+                        "forecast_zero": payload.get("forecast_zero"),
+                        "total": payload.get("total"),
+                        "cyclones": storms,
+                        "strongest": strongest,
+                        "from_cache": payload.get("from_cache"),
+                        "provider": payload.get("provider"),
+                        "model": payload.get("model"),
+                    }
+        elif name == "get_tropical_cyclone":
+            if not self.cyclone_service or not self.cyclones_enabled:
+                out = {"ok": False, "error": "CYCLONES_UNAVAILABLE"}
+            else:
+                payload = await self.cyclone_service.fetch_cyclones(include_details=True)
+                storm = self.cyclone_service.get_storm(payload, tool_input.get("cyclone_id", ""))
+                if not storm:
+                    out = {"ok": False, "error": "NOT_FOUND", "cyclone_id": tool_input.get("cyclone_id")}
+                else:
+                    out = {
+                        "ok": True,
+                        "cyclone": storm,
+                        "initialization_time": payload.get("initialization_time"),
+                        "provider": payload.get("provider"),
+                        "model": payload.get("model"),
+                        "from_cache": payload.get("from_cache"),
+                    }
+        elif name == "get_cyclone_forecast":
+            if not self.cyclone_service or not self.cyclones_enabled:
+                out = {"ok": False, "error": "CYCLONES_UNAVAILABLE"}
+            else:
+                hour = int(tool_input.get("forecast_hour", 0))
+                payload = await self.cyclone_service.fetch_cyclones(include_details=True)
+                storm = self.cyclone_service.get_storm(payload, tool_input.get("cyclone_id", ""))
+                if not storm:
+                    out = {"ok": False, "error": "NOT_FOUND"}
+                else:
+                    point = self.cyclone_service.point_at_hour(storm, hour)
+                    out = {
+                        "ok": True,
+                        "cyclone_id": storm.get("tropical_cyclone_id"),
+                        "storm_name": storm.get("storm_name"),
+                        "forecast_hour": hour,
+                        "point": point,
+                        "has_cone": bool(storm.get("cone") and storm["cone"].get("geometry")),
+                        "landfall_count": len(storm.get("landfalls") or []),
+                        "cone_note": (
+                            "Forecast cone is the WeatherMesh ensemble-supported range of "
+                            "plausible cyclone positions — not a guaranteed impact region."
+                        ),
+                        "provider": payload.get("provider"),
+                        "model": payload.get("model"),
+                    }
+        elif name == "get_gridded_forecast_summary":
+            if not self.gridded_service or not self.gridded_enabled:
+                out = {"ok": False, "error": "GRIDDED_UNAVAILABLE"}
+            else:
+                out = await self.gridded_service.get_summary(
+                    tool_input.get("variable", "temperature_2m"),
+                    tool_input.get("bbox", "-130,20,-60,55"),
+                    int(tool_input.get("forecast_hour", 0) or 0),
+                )
         else:
             out = {"ok": False, "error": "UNKNOWN_TOOL", "name": name}
 
@@ -368,7 +471,11 @@ class BedrockChatService:
         tool_trace: List[Dict[str, Any]] = []
         sources: List[Dict[str, Any]] = []
         actions: List[Dict[str, Any]] = []
-        active_tools = ai_tools.tools_for_config(self.balloons_enabled)
+        active_tools = ai_tools.tools_for_config(
+            balloons_enabled=self.balloons_enabled,
+            cyclones_enabled=self.cyclones_enabled,
+            gridded_enabled=self.gridded_enabled,
+        )
 
         try:
             # Tool loop (max 3 rounds)
@@ -464,7 +571,7 @@ class BedrockChatService:
                                 "retrievedAt": result.get("retrievedAt"),
                             }
                         )
-                    elif name in ("get_fleet_status", "get_balloon") and result.get("ok"):
+                    elif name == "get_fleet_status" and result.get("ok"):
                         sources.append(
                             {
                                 "type": "fleet_telemetry",
@@ -472,11 +579,71 @@ class BedrockChatService:
                                 "retrievedAt": result.get("retrievedAt"),
                             }
                         )
-                    elif name == "get_balloon" and result.get("ok"):
+                    elif name == "get_balloon" and result.get("ok") and result.get("balloon"):
+                        sources.append(
+                            {
+                                "type": "fleet_telemetry",
+                                "provider": result.get("provider", "WindBorne Treasure"),
+                                "retrievedAt": result.get("retrievedAt"),
+                            }
+                        )
                         actions.append(
                             {
                                 "type": "SELECT_BALLOON",
                                 "balloonId": result["balloon"]["id"],
+                            }
+                        )
+                    elif name == "list_tropical_cyclones" and result.get("ok"):
+                        sources.append(
+                            {
+                                "type": "tropical_cyclones",
+                                "provider": result.get("provider"),
+                                "retrievedAt": result.get("retrievedAt"),
+                            }
+                        )
+                        strongest = result.get("strongest")
+                        if strongest and strongest.get("tropical_cyclone_id"):
+                            actions.append(
+                                {
+                                    "type": "SELECT_CYCLONE",
+                                    "cycloneId": strongest["tropical_cyclone_id"],
+                                }
+                            )
+                            actions.append(
+                                {
+                                    "type": "FLY_TO_CYCLONE",
+                                    "cycloneId": strongest["tropical_cyclone_id"],
+                                }
+                            )
+                    elif name in ("get_tropical_cyclone", "get_cyclone_forecast") and result.get("ok"):
+                        sources.append(
+                            {
+                                "type": "tropical_cyclone",
+                                "provider": result.get("provider"),
+                                "retrievedAt": result.get("retrievedAt"),
+                            }
+                        )
+                        cid = (
+                            (result.get("cyclone") or {}).get("tropical_cyclone_id")
+                            or result.get("cyclone_id")
+                        )
+                        if cid:
+                            actions.append({"type": "SELECT_CYCLONE", "cycloneId": cid})
+                            actions.append({"type": "FLY_TO_CYCLONE", "cycloneId": cid})
+                        if name == "get_cyclone_forecast" and result.get("forecast_hour") is not None:
+                            actions.append(
+                                {
+                                    "type": "SET_CYCLONE_FORECAST_HOUR",
+                                    "hour": int(result["forecast_hour"]),
+                                }
+                            )
+                    elif name == "get_gridded_forecast_summary" and result.get("ok"):
+                        sources.append(
+                            {
+                                "type": "gridded_forecast",
+                                "provider": result.get("provider"),
+                                "variable": result.get("variable"),
+                                "retrievedAt": result.get("retrievedAt"),
                             }
                         )
 

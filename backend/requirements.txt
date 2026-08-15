@@ -5,4 +5,8 @@ python-dotenv
 boto3
 botocore
 pytest
+numpy
+xarray
+netCDF4
+pillow
 

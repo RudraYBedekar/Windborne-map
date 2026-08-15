@@ -4,7 +4,9 @@ import React, { useEffect, useState, useMemo, useCallback, useRef } from 'react'
 import Navbar from '@/components/Navbar';
 import BalloonDetailPanel from '@/components/BalloonDetailPanel';
 import CityWeatherPanel from '@/components/CityWeatherPanel';
+import CycloneDetailPanel, { CycloneDetail } from '@/components/CycloneDetailPanel';
 import TimelineControls from '@/components/TimelineControls';
+import ForecastHourControls from '@/components/ForecastHourControls';
 import MapComponent from '@/components/Map';
 import WeatherEffects from '@/components/WeatherEffects';
 import VickyChat from '@/components/VickyChat';
@@ -17,11 +19,24 @@ import {
   LocationFilter,
 } from '@/services/windborne';
 import { fetchWeather, WeatherData } from '@/services/weather';
+import {
+  CYCLONE_FORECAST_HOURS,
+  GRID_FORECAST_HOURS,
+  MeshVariable,
+  fetchCycloneDetail,
+  fetchCyclonesGeoJson,
+  fetchMeshStatus,
+  meshPngUrl,
+} from '@/services/cyclones';
+import type { FeatureCollection } from 'geojson';
 import { ShieldAlert } from 'lucide-react';
 import { Toaster, toast } from 'react-hot-toast';
 
 /** When true, show the full Treasure constellation globally. Otherwise only location-filtered balloons. */
 const SHOW_ALL_BALLOONS = process.env.NEXT_PUBLIC_SHOW_BALLOONS === 'true';
+const DEFAULT_MESH_BBOX = '-130,20,-60,55';
+/** Match backend WB_MIN_REQUEST_INTERVAL_SEC (5 min) for UI refresh. */
+const WB_UI_REFRESH_MS = 5 * 60 * 1000;
 
 export default function Home() {
   const [balloons, setBalloons] = useState<Balloon[]>([]);
@@ -42,6 +57,23 @@ export default function Home() {
   const [scrubTime, setScrubTime] = useState(0);
   const [isPlaying, setIsPlaying] = useState(false);
   const [playbackSpeed, setPlaybackSpeed] = useState<number>(1);
+
+  const [globeMode, setGlobeMode] = useState<'weather' | 'cyclones'>('weather');
+  const [cycloneGeoJson, setCycloneGeoJson] = useState<FeatureCollection | null>(null);
+  const [selectedCycloneId, setSelectedCycloneId] = useState<string | null>(null);
+  const [selectedCyclone, setSelectedCyclone] = useState<CycloneDetail | null>(null);
+  const [cyclonePoint, setCyclonePoint] = useState<Record<string, unknown> | null>(null);
+  const [cycloneInitTime, setCycloneInitTime] = useState<string | null>(null);
+  const [cycloneForecastHour, setCycloneForecastHour] = useState(0);
+  const [showEnsemble, setShowEnsemble] = useState(false);
+  const [cycloneError, setCycloneError] = useState<string | null>(null);
+  const [cyclonesEnabled, setCyclonesEnabled] = useState(true);
+  const [griddedEnabled, setGriddedEnabled] = useState(true);
+
+  const [meshVariable, setMeshVariable] = useState<MeshVariable>('off');
+  const [meshForecastHour, setMeshForecastHour] = useState(0);
+  const [meshImageUrl, setMeshImageUrl] = useState<string | null>(null);
+  const [meshHint, setMeshHint] = useState<string | null>(null);
 
   useEffect(() => {
     const now = Date.now();
@@ -119,6 +151,18 @@ export default function Home() {
   }, [loadData]);
 
   useEffect(() => {
+    let cancelled = false;
+    fetchMeshStatus().then((status) => {
+      if (cancelled || !status) return;
+      setCyclonesEnabled(status.cyclones?.enabled !== false);
+      setGriddedEnabled(status.gridded?.enabled !== false);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
     if (!selectedLocation) return;
     const nearby = filterBalloonsNearLocation(balloons, selectedLocation, 250);
     const shortName = selectedLocation.name.split(',')[0] || selectedLocation.name;
@@ -152,6 +196,84 @@ export default function Home() {
     selectedBalloon?.latestPoint?.lon,
   ]);
 
+  // Cyclone GeoJSON — refresh on mode / hour / ensemble; poll every 5 min
+  useEffect(() => {
+    if (globeMode !== 'cyclones') return;
+    let cancelled = false;
+
+    const load = async () => {
+      const { geojson, error: err } = await fetchCyclonesGeoJson({
+        forecastHour: cycloneForecastHour,
+        includeEnsemble: showEnsemble,
+      });
+      if (cancelled) return;
+      if (err) {
+        setCycloneError(err);
+        setCycloneGeoJson(null);
+        toast.error(err.slice(0, 120), { id: 'cyclone-load' });
+        return;
+      }
+      setCycloneError(null);
+      setCycloneGeoJson(geojson);
+      const init = (geojson as FeatureCollection & { properties?: { initialization_time?: string } })
+        ?.properties?.initialization_time;
+      if (init) setCycloneInitTime(init);
+    };
+
+    load();
+    const interval = setInterval(load, WB_UI_REFRESH_MS);
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, [globeMode, cycloneForecastHour, showEnsemble]);
+
+  // Selected cyclone detail
+  useEffect(() => {
+    if (!selectedCycloneId || globeMode !== 'cyclones') {
+      setSelectedCyclone(null);
+      setCyclonePoint(null);
+      return;
+    }
+    let cancelled = false;
+    fetchCycloneDetail(selectedCycloneId, cycloneForecastHour).then((res) => {
+      if (cancelled) return;
+      if (!res.ok || !res.cyclone) {
+        toast.error(res.message || res.error || 'Cyclone unavailable', { id: 'cyclone-detail' });
+        return;
+      }
+      setSelectedCyclone(res.cyclone);
+      setCyclonePoint(res.point || null);
+      if (res.initialization_time) setCycloneInitTime(res.initialization_time);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedCycloneId, cycloneForecastHour, globeMode]);
+
+  // WeatherMesh PNG overlay — cache-bust only every 5 min so we don't hammer the gate
+  useEffect(() => {
+    if (meshVariable === 'off') {
+      setMeshImageUrl(null);
+      setMeshHint(null);
+      return;
+    }
+    if (!griddedEnabled) {
+      setMeshImageUrl(null);
+      setMeshHint('Gridded forecasts disabled');
+      return;
+    }
+
+    const tick = () => {
+      const base = meshPngUrl(meshVariable, meshForecastHour, DEFAULT_MESH_BBOX);
+      setMeshImageUrl(`${base}&t=${Math.floor(Date.now() / WB_UI_REFRESH_MS)}`);
+      setMeshHint(`CONUS · +${meshForecastHour}h · refresh ≤5 min`);
+    };
+    tick();
+    const interval = setInterval(tick, WB_UI_REFRESH_MS);
+    return () => clearInterval(interval);
+  }, [meshVariable, meshForecastHour, griddedEnabled]);
+
   // Playback
   useEffect(() => {
     if (!isPlaying) return;
@@ -171,12 +293,27 @@ export default function Home() {
   const selectBalloon = (id: string | null) => {
     setSelectedId(id);
     if (id) {
+      setSelectedCycloneId(null);
       setAutoRotate(false);
       setIsTrackingCamera(true);
     } else {
       setIsTrackingCamera(false);
     }
   };
+
+  const selectCyclone = (id: string | null) => {
+    setSelectedCycloneId(id);
+    if (id) {
+      setSelectedId(null);
+      setIsTrackingCamera(false);
+      setAutoRotate(false);
+      setGlobeMode('cyclones');
+    }
+  };
+
+  const showBalloonTimeline = balloonsVisible && timelineReady && globeMode === 'weather';
+  const showCycloneHours = globeMode === 'cyclones';
+  const showMeshHours = meshVariable !== 'off' && globeMode === 'weather';
 
   return (
     <main className="flex flex-col h-screen w-screen overflow-hidden bg-slate-950 text-slate-100 selection:bg-cyan-500/30 font-sans">
@@ -187,6 +324,7 @@ export default function Home() {
         onSelectLocation={(lat, lon, name, bbox) => {
           setSelectedLocation({ lat, lon, name, bbox });
           setSelectedId(null);
+          setSelectedCycloneId(null);
           setAutoRotate(false);
           setIsTrackingCamera(false);
         }}
@@ -197,6 +335,7 @@ export default function Home() {
         onResetCamera={() => {
           setSelectedId(null);
           setSelectedLocation(null);
+          setSelectedCycloneId(null);
           setAutoRotate(false);
           setIsTrackingCamera(false);
         }}
@@ -207,7 +346,7 @@ export default function Home() {
       <div className="flex-1 relative flex h-[calc(100vh-3.5rem)] w-full overflow-hidden">
         <WeatherEffects weather={currentWeather} />
 
-        {selectedLocation && !selectedBalloon && (
+        {selectedLocation && !selectedBalloon && !selectedCyclone && (
           <CityWeatherPanel
             cityName={selectedLocation.name}
             lat={selectedLocation.lat}
@@ -234,6 +373,16 @@ export default function Home() {
           />
         )}
 
+        {selectedCyclone && globeMode === 'cyclones' && (
+          <CycloneDetailPanel
+            cyclone={selectedCyclone}
+            forecastHour={cycloneForecastHour}
+            point={cyclonePoint}
+            initializationTime={cycloneInitTime}
+            onClose={() => setSelectedCycloneId(null)}
+          />
+        )}
+
         <VickyChat
           balloons={visibleBalloons}
           selectedBalloon={selectedBalloon}
@@ -251,11 +400,22 @@ export default function Home() {
                   `Location (${Number(action.latitude).toFixed(2)}°, ${Number(action.longitude).toFixed(2)}°)`,
               });
               setSelectedId(null);
+              setSelectedCycloneId(null);
               setIsTrackingCamera(false);
               setAutoRotate(false);
             }
             if (action.type === 'SELECT_BALLOON' && action.balloonId) {
               selectBalloon(String(action.balloonId));
+            }
+            if (
+              (action.type === 'SELECT_CYCLONE' || action.type === 'FLY_TO_CYCLONE') &&
+              action.cycloneId
+            ) {
+              selectCyclone(String(action.cycloneId));
+            }
+            if (action.type === 'SET_CYCLONE_FORECAST_HOUR' && action.forecastHour != null) {
+              setGlobeMode('cyclones');
+              setCycloneForecastHour(Number(action.forecastHour));
             }
           }}
         />
@@ -267,7 +427,20 @@ export default function Home() {
           </div>
         )}
 
-        {selectedLocation && (
+        {globeMode === 'cyclones' && cycloneError && (
+          <div className="absolute top-3 left-1/2 -translate-x-1/2 z-20 bg-rose-950/90 border border-rose-700/80 text-rose-100 px-3.5 py-1.5 rounded-lg shadow-xl text-xs font-mono backdrop-blur-md max-w-[90vw] truncate">
+            Cyclones unavailable: {cycloneError}
+          </div>
+        )}
+
+        {globeMode === 'cyclones' && !cycloneError && cycloneGeoJson && (
+          <div className="absolute top-3 left-1/2 -translate-x-1/2 z-20 bg-slate-950/90 border border-slate-700 text-slate-200 px-3.5 py-1.5 rounded-lg shadow-xl text-xs font-mono backdrop-blur-md max-w-[90vw] truncate">
+            {cycloneGeoJson.features.filter((f) => f.properties?.feature_type === 'position').length}{' '}
+            storm(s) · click marker · forecast +{cycloneForecastHour}h · WB ≤5 min
+          </div>
+        )}
+
+        {selectedLocation && globeMode === 'weather' && (
           <div className="absolute top-3 left-1/2 -translate-x-1/2 z-20 bg-slate-950/90 border border-slate-700 text-slate-200 px-3.5 py-1.5 rounded-lg shadow-xl text-xs font-mono backdrop-blur-md max-w-[90vw] truncate">
             {visibleBalloons.length} balloon{visibleBalloons.length === 1 ? '' : 's'} near{' '}
             {selectedLocation.name.split(',')[0]} · click a marker for live status · Treasure feed
@@ -281,7 +454,7 @@ export default function Home() {
           </div>
         )}
 
-        {balloonsVisible && timelineReady && (
+        {showBalloonTimeline && (
           <TimelineControls
             minTime={minTime}
             maxTime={maxTime}
@@ -301,6 +474,26 @@ export default function Home() {
           />
         )}
 
+        {showCycloneHours && (
+          <ForecastHourControls
+            label="CYCLONE FORECAST"
+            hours={CYCLONE_FORECAST_HOURS}
+            value={cycloneForecastHour}
+            onChange={setCycloneForecastHour}
+            hint={cycloneInitTime ? `Init ${cycloneInitTime}` : 'WeatherMesh tropical cyclones'}
+          />
+        )}
+
+        {showMeshHours && !showCycloneHours && (
+          <ForecastHourControls
+            label="MESH FORECAST"
+            hours={GRID_FORECAST_HOURS}
+            value={meshForecastHour}
+            onChange={setMeshForecastHour}
+            hint={meshHint}
+          />
+        )}
+
         <div className="flex-1 h-full w-full relative">
           <MapComponent
             balloons={visibleBalloons}
@@ -315,6 +508,7 @@ export default function Home() {
               }
               setSelectedLocation(loc);
               setSelectedId(null);
+              setSelectedCycloneId(null);
               setIsTrackingCamera(false);
             }}
             autoRotate={autoRotate}
@@ -325,6 +519,22 @@ export default function Home() {
                 ? scrubTime
                 : undefined
             }
+            globeMode={globeMode}
+            onGlobeModeChange={(mode) => {
+              setGlobeMode(mode);
+              if (mode === 'weather') setSelectedCycloneId(null);
+            }}
+            cycloneGeoJson={cycloneGeoJson}
+            selectedCycloneId={selectedCycloneId}
+            onSelectCyclone={selectCyclone}
+            showEnsemble={showEnsemble}
+            onToggleEnsemble={() => setShowEnsemble((v) => !v)}
+            meshVariable={meshVariable}
+            onMeshVariableChange={setMeshVariable}
+            meshImageUrl={meshImageUrl}
+            meshBbox={DEFAULT_MESH_BBOX}
+            cyclonesEnabled={cyclonesEnabled}
+            griddedEnabled={griddedEnabled}
           />
         </div>
       </div>

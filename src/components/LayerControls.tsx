@@ -17,6 +17,14 @@ interface LayerControlsProps {
   weatherLayers: Record<WeatherLayerId, boolean>;
   onToggleWeather: (id: WeatherLayerId) => void;
   radarAgeLabel?: string | null;
+  globeMode?: 'weather' | 'cyclones';
+  onGlobeModeChange?: (mode: 'weather' | 'cyclones') => void;
+  showEnsemble?: boolean;
+  onToggleEnsemble?: () => void;
+  meshVariable?: 'off' | 'temperature_2m' | 'wind_speed' | 'pressure_msl' | 'precipitation';
+  onMeshVariableChange?: (v: 'off' | 'temperature_2m' | 'wind_speed' | 'pressure_msl' | 'precipitation') => void;
+  cyclonesEnabled?: boolean;
+  griddedEnabled?: boolean;
 }
 
 const WEATHER_ICONS: Record<WeatherLayerId, ReactNode> = {
@@ -33,6 +41,14 @@ export default function LayerControls({
   weatherLayers,
   onToggleWeather,
   radarAgeLabel,
+  globeMode = 'weather',
+  onGlobeModeChange,
+  showEnsemble = false,
+  onToggleEnsemble,
+  meshVariable = 'off',
+  onMeshVariableChange,
+  cyclonesEnabled = true,
+  griddedEnabled = true,
 }: LayerControlsProps) {
   const [isOpen, setIsOpen] = useState(false);
 
@@ -67,6 +83,89 @@ export default function LayerControls({
               <X className="w-3.5 h-3.5" />
             </button>
           </div>
+
+          {/* Globe mode */}
+          {onGlobeModeChange && (
+            <div>
+              <p className="text-[9px] uppercase tracking-widest text-slate-500 mb-1.5">MODE</p>
+              <div className="grid grid-cols-2 gap-1.5">
+                {(['weather', 'cyclones'] as const).map((mode) => {
+                  const locked = mode === 'cyclones' && !cyclonesEnabled;
+                  return (
+                    <button
+                      key={mode}
+                      type="button"
+                      disabled={locked}
+                      onClick={() => onGlobeModeChange(mode)}
+                      className={cn(
+                        'rounded-lg px-2.5 py-1.5 text-xs border capitalize',
+                        locked && 'opacity-40 cursor-not-allowed',
+                        globeMode === mode
+                          ? 'bg-cyan-950/90 border-cyan-500/80 text-cyan-300 font-bold'
+                          : 'bg-slate-900/60 border-slate-800/80 text-slate-400'
+                      )}
+                    >
+                      {mode}
+                    </button>
+                  );
+                })}
+              </div>
+              {globeMode === 'cyclones' && onToggleEnsemble && (
+                <button
+                  type="button"
+                  onClick={onToggleEnsemble}
+                  className={cn(
+                    'mt-1.5 w-full rounded-lg px-2.5 py-1.5 text-[10px] border',
+                    showEnsemble
+                      ? 'bg-amber-950/80 border-amber-700 text-amber-200'
+                      : 'bg-slate-900/60 border-slate-800 text-slate-400'
+                  )}
+                >
+                  {showEnsemble ? 'Ensemble / landfalls ON' : 'Show Ensemble Paths'}
+                </button>
+              )}
+            </div>
+          )}
+
+          {/* WeatherMesh gridded */}
+          {onMeshVariableChange && (
+            <div>
+              <p className="text-[9px] uppercase tracking-widest text-slate-500 mb-1.5">
+                WEATHERMESH FORECAST
+              </p>
+              <div className="space-y-1">
+                {(
+                  [
+                    ['off', 'Off'],
+                    ['temperature_2m', 'Temperature'],
+                    ['wind_speed', 'Wind'],
+                    ['pressure_msl', 'Pressure'],
+                    ['precipitation', 'Precipitation'],
+                  ] as const
+                ).map(([id, label]) => {
+                  const locked = !griddedEnabled && id !== 'off';
+                  return (
+                    <button
+                      key={id}
+                      type="button"
+                      disabled={locked}
+                      onClick={() => onMeshVariableChange(id)}
+                      className={cn(
+                        'w-full rounded-lg px-2.5 py-1.5 text-xs border text-left',
+                        locked && 'opacity-40 cursor-not-allowed',
+                        meshVariable === id
+                          ? 'bg-sky-950/90 border-sky-500/80 text-sky-200 font-bold'
+                          : 'bg-slate-900/60 border-slate-800/80 text-slate-400'
+                      )}
+                    >
+                      {label}
+                    </button>
+                  );
+                })}
+              </div>
+              <p className="mt-1 text-[9px] text-slate-500">Upstream refresh ≤ every 5 min (trial safe)</p>
+            </div>
+          )}
 
           {/* Basemap Switcher */}
           <div>

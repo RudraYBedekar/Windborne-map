@@ -17,17 +17,32 @@ import {
 } from '@/config/map';
 import LayerControls from '@/components/LayerControls';
 import type { FeatureCollection, Feature } from 'geojson';
+import type { MeshVariable } from '@/services/cyclones';
+import { parseBbox } from '@/services/cyclones';
 
 interface MapComponentProps {
-    balloons: Balloon[];
-    selectedId: string | null;
-    onSelectBalloon: (id: string | null) => void;
+  balloons: Balloon[];
+  selectedId: string | null;
+  onSelectBalloon: (id: string | null) => void;
   selectedLocation?: LocationFilter | null;
   onSelectLocation?: (loc: LocationFilter | null) => void;
-    autoRotate?: boolean;
+  autoRotate?: boolean;
   scrubTime?: number;
   trackSelected?: boolean;
   onStopTracking?: () => void;
+  globeMode?: 'weather' | 'cyclones';
+  onGlobeModeChange?: (mode: 'weather' | 'cyclones') => void;
+  cycloneGeoJson?: FeatureCollection | null;
+  selectedCycloneId?: string | null;
+  onSelectCyclone?: (id: string | null) => void;
+  showEnsemble?: boolean;
+  onToggleEnsemble?: () => void;
+  meshVariable?: MeshVariable;
+  onMeshVariableChange?: (v: MeshVariable) => void;
+  meshImageUrl?: string | null;
+  meshBbox?: string;
+  cyclonesEnabled?: boolean;
+  griddedEnabled?: boolean;
 }
 
 const POIs = [
@@ -49,6 +64,7 @@ const DEFAULT_WEATHER: Record<WeatherLayerId, boolean> = {
 };
 
 const BALLOON_HIT_LAYERS = ['balloon-hit', 'balloon-points', 'balloon-points-halo', 'balloon-pulsing'];
+const CYCLONE_HIT_LAYERS = ['cyclone-position', 'cyclone-position-halo', 'cyclone-mean-path', 'cyclone-cone'];
 
 function setupMapAssets(map: MaplibreMap) {
   try {
@@ -144,6 +160,19 @@ export default function MapComponent({
   scrubTime,
   trackSelected = false,
   onStopTracking,
+  globeMode = 'weather',
+  onGlobeModeChange,
+  cycloneGeoJson = null,
+  selectedCycloneId = null,
+  onSelectCyclone,
+  showEnsemble = false,
+  onToggleEnsemble,
+  meshVariable = 'off',
+  onMeshVariableChange,
+  meshImageUrl = null,
+  meshBbox = '-130,20,-60,55',
+  cyclonesEnabled = true,
+  griddedEnabled = true,
 }: MapComponentProps) {
   const mapRef = React.useRef<MapRef>(null);
   const isProgrammaticMove = React.useRef(false);
@@ -391,6 +420,29 @@ export default function MapComponent({
       const map = mapRef.current?.getMap();
       const { lngLat, point } = event;
 
+      if (globeMode === 'cyclones' && onSelectCyclone) {
+        const cycloneLayers = CYCLONE_HIT_LAYERS.filter((id) => !!map?.getLayer(id));
+        let cycloneFeature = event.features?.find((f) =>
+          CYCLONE_HIT_LAYERS.includes(f.layer?.id || '')
+        );
+        if (!cycloneFeature && map && cycloneLayers.length) {
+          const pad = 14;
+          const hits = map.queryRenderedFeatures(
+            [
+              [point.x - pad, point.y - pad],
+              [point.x + pad, point.y + pad],
+            ],
+            { layers: cycloneLayers }
+          );
+          cycloneFeature = hits.find((f) => f.properties?.tropical_cyclone_id) as typeof cycloneFeature;
+        }
+        const cid = cycloneFeature?.properties?.tropical_cyclone_id;
+        if (cid) {
+          onSelectCyclone(String(cid));
+          return;
+        }
+      }
+
       // Prefer a padded hit-test so small balloon icons are easier to click
       let balloonFeature = event.features?.find(
         (f) => f.properties?.id && BALLOON_HIT_LAYERS.includes(f.layer?.id || '')
@@ -424,17 +476,61 @@ export default function MapComponent({
         onSelectBalloon(null);
       }
     },
-    [onSelectBalloon, onSelectLocation]
+    [globeMode, onSelectBalloon, onSelectCyclone, onSelectLocation]
   );
 
-  const onMouseMove = React.useCallback((event: MapLayerMouseEvent) => {
-    const map = mapRef.current?.getMap();
-    if (!map) return;
-    const overBalloon = (event.features || []).some(
-      (f) => f.properties?.id && BALLOON_HIT_LAYERS.includes(f.layer?.id || '')
+  const onMouseMove = React.useCallback(
+    (event: MapLayerMouseEvent) => {
+      const map = mapRef.current?.getMap();
+      if (!map) return;
+      const overBalloon = (event.features || []).some(
+        (f) => f.properties?.id && BALLOON_HIT_LAYERS.includes(f.layer?.id || '')
+      );
+      const overCyclone = (event.features || []).some((f) =>
+        CYCLONE_HIT_LAYERS.includes(f.layer?.id || '')
+      );
+      map.getCanvas().style.cursor = overBalloon || overCyclone ? 'pointer' : '';
+    },
+    []
+  );
+
+  const meshCoords = React.useMemo(() => {
+    const parsed = parseBbox(meshBbox);
+    if (!parsed) return null;
+    const [west, south, east, north] = parsed;
+    return [
+      [west, north],
+      [east, north],
+      [east, south],
+      [west, south],
+    ] as [[number, number], [number, number], [number, number], [number, number]];
+  }, [meshBbox]);
+
+  // Fly to selected cyclone position
+  React.useEffect(() => {
+    if (!selectedCycloneId || !cycloneGeoJson || !mapRef.current) return;
+    const pos = cycloneGeoJson.features.find(
+      (f) =>
+        f.properties?.tropical_cyclone_id === selectedCycloneId &&
+        f.properties?.feature_type === 'position' &&
+        f.geometry?.type === 'Point'
     );
-    map.getCanvas().style.cursor = overBalloon ? 'pointer' : '';
-  }, []);
+    if (!pos || pos.geometry.type !== 'Point') return;
+    const [lon, lat] = pos.geometry.coordinates;
+    isProgrammaticMove.current = true;
+    mapRef.current.flyTo({
+      center: [lon, lat],
+      zoom: Math.max(mapRef.current.getZoom(), 4.5),
+      pitch: 40,
+      speed: 1.1,
+      essential: true,
+    });
+    mapRef.current.getMap().once('moveend', () => {
+      window.setTimeout(() => {
+        isProgrammaticMove.current = false;
+      }, 80);
+    });
+  }, [selectedCycloneId, cycloneGeoJson]);
 
   // Compute points GeoJSON filtered by scrubTime if provided
   const pointsGeoJson: FeatureCollection = React.useMemo(() => {
@@ -511,6 +607,14 @@ export default function MapComponent({
           weatherLayers={weatherLayers}
           onToggleWeather={toggleWeather}
           radarAgeLabel={radarAgeLabel}
+          globeMode={globeMode}
+          onGlobeModeChange={onGlobeModeChange}
+          showEnsemble={showEnsemble}
+          onToggleEnsemble={onToggleEnsemble}
+          meshVariable={meshVariable}
+          onMeshVariableChange={onMeshVariableChange}
+          cyclonesEnabled={cyclonesEnabled}
+          griddedEnabled={griddedEnabled}
         />
       </div>
 
@@ -528,7 +632,10 @@ export default function MapComponent({
         maxZoom={18}
         mapStyle={mapStyle as any}
         projection="globe"
-        interactiveLayerIds={BALLOON_HIT_LAYERS}
+        interactiveLayerIds={[
+          ...BALLOON_HIT_LAYERS,
+          ...(globeMode === 'cyclones' ? CYCLONE_HIT_LAYERS : []),
+        ]}
         onClick={onMapClick}
         onMouseMove={onMouseMove}
         style={{ width: '100%', height: '100%' }}
@@ -536,6 +643,16 @@ export default function MapComponent({
           requestAnimationFrame(() => setupMapAssets(e.target));
         }}
       >
+        {/* WeatherMesh gridded PNG overlay */}
+        {meshVariable !== 'off' && meshImageUrl && meshCoords && (
+          <Source id="weathermesh-grid" type="image" url={meshImageUrl} coordinates={meshCoords}>
+            <Layer
+              id="weathermesh-grid-layer"
+              type="raster"
+              paint={{ 'raster-opacity': 0.55, 'raster-fade-duration': 0 }}
+            />
+          </Source>
+        )}
         {/* Day/Night Solar Terminator Layer */}
         {weatherLayers.terminator && (
           <Source id="solar-terminator" type="geojson" data={terminatorGeoJson}>
@@ -704,6 +821,117 @@ export default function MapComponent({
                         </Source>
                     );
                 })()}
+
+        {/* Tropical cyclone layers */}
+        {globeMode === 'cyclones' && cycloneGeoJson && (
+          <Source id="tropical-cyclones" type="geojson" data={cycloneGeoJson}>
+            <Layer
+              id="cyclone-cone"
+              type="fill"
+              filter={['==', ['get', 'feature_type'], 'uncertainty_cone']}
+              paint={{
+                'fill-color': '#f59e0b',
+                'fill-opacity': [
+                  'case',
+                  ['==', ['get', 'tropical_cyclone_id'], selectedCycloneId || ''],
+                  0.28,
+                  0.14,
+                ],
+              }}
+            />
+            <Layer
+              id="cyclone-cone-outline"
+              type="line"
+              filter={['==', ['get', 'feature_type'], 'uncertainty_cone']}
+              paint={{
+                'line-color': '#fbbf24',
+                'line-width': 1.5,
+                'line-opacity': 0.7,
+              }}
+            />
+            <Layer
+              id="cyclone-mean-path"
+              type="line"
+              filter={['==', ['get', 'feature_type'], 'mean_path']}
+              layout={{ 'line-join': 'round', 'line-cap': 'round' }}
+              paint={{
+                'line-color': [
+                  'case',
+                  ['==', ['get', 'tropical_cyclone_id'], selectedCycloneId || ''],
+                  '#22d3ee',
+                  '#94a3b8',
+                ],
+                'line-width': [
+                  'case',
+                  ['==', ['get', 'tropical_cyclone_id'], selectedCycloneId || ''],
+                  3.5,
+                  2,
+                ],
+                'line-opacity': 0.9,
+              }}
+            />
+            <Layer
+              id="cyclone-landfall"
+              type="circle"
+              filter={['==', ['get', 'feature_type'], 'landfall']}
+              paint={{
+                'circle-radius': 4,
+                'circle-color': '#f97316',
+                'circle-stroke-width': 1,
+                'circle-stroke-color': '#fff7ed',
+                'circle-opacity': showEnsemble ? 0.9 : 0,
+              }}
+            />
+            <Layer
+              id="cyclone-position-halo"
+              type="circle"
+              filter={['==', ['get', 'feature_type'], 'position']}
+              paint={{
+                'circle-radius': [
+                  'case',
+                  ['==', ['get', 'tropical_cyclone_id'], selectedCycloneId || ''],
+                  16,
+                  11,
+                ],
+                'circle-color': '#ef4444',
+                'circle-opacity': 0.25,
+              }}
+            />
+            <Layer
+              id="cyclone-position"
+              type="circle"
+              filter={['==', ['get', 'feature_type'], 'position']}
+              paint={{
+                'circle-radius': [
+                  'case',
+                  ['==', ['get', 'tropical_cyclone_id'], selectedCycloneId || ''],
+                  9,
+                  6,
+                ],
+                'circle-color': '#ef4444',
+                'circle-stroke-width': 2,
+                'circle-stroke-color': '#ffffff',
+              }}
+            />
+            <Layer
+              id="cyclone-labels"
+              type="symbol"
+              filter={['==', ['get', 'feature_type'], 'position']}
+              layout={{
+                'text-field': ['coalesce', ['get', 'storm_name'], ['get', 'tropical_cyclone_id']],
+                'text-size': 11,
+                'text-offset': [0, 1.4],
+                'text-anchor': 'top',
+                'text-allow-overlap': false,
+              }}
+              paint={{
+                'text-color': '#fecaca',
+                'text-halo-color': '#020617',
+                'text-halo-width': 1.5,
+              }}
+            />
+          </Source>
+        )}
 
         {/* Active Balloon Scatter Vectors */}
                 <Source id="points" type="geojson" data={pointsGeoJson}>

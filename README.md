@@ -16,9 +16,11 @@ Interactive MapLibre 3D globe for **WindBorne WeatherMesh** forecasts and **Vick
 |------|------------------|
 | **3D globe** | MapLibre globe with satellite, hybrid, dark, and streets basemaps; atmosphere sky |
 | **WeatherMesh** | Point forecasts via official API (`temperature`, pressure, precip, wind); 5‑min cache; Open‑Meteo fallback if upstream fails |
+| **Tropical cyclones** | WeatherMesh-6 tracks, uncertainty cone, forecast-hour scrub (+0…+120h); upstream gated to **≤1 request / 5 min** |
+| **Gridded forecast** | Temp / wind / pressure / precip PNG overlay (CONUS bbox) via `/api/weather/grid`; same 5‑min WindBorne gate |
 | **Place search** | Nominatim geocoding + city weather panel for any location |
 | **Overlays** | RainViewer radar (free), accurate day/night solar terminator, optional OpenWeather clouds / temp / wind |
-| **Vicky-AI** | Bedrock Converse (Claude Haiku 4.5) with tools: `search_location`, `get_weather`, fleet/balloon lookups when enabled |
+| **Vicky-AI** | Bedrock Converse (Claude Haiku 4.5) with tools: weather, cyclones, gridded summary, location search; fleet tools when enabled |
 | **Effects** | Rain / snow / wind particles driven by live weather |
 | **Fleet UI** | Treasure telemetry, 24h timeline, detail panel & export — **off by default** (feed not operationally accurate) |
 
@@ -78,6 +80,10 @@ Open [http://localhost:3000](http://localhost:3000).
 | `BEDROCK_AGENT_MODEL` | `backend/.env` | e.g. Claude Haiku 4.5 inference profile |
 | `AWS_ACCESS_KEY_ID` / `SECRET` | `backend/.env` | Leave empty on EC2 with IAM role |
 | `BALLOONS_ENABLED` | `backend/.env` | Allow AI fleet tools (`false` by default) |
+| `CYCLONES_ENABLED` | `backend/.env` | Tropical cyclone mode (`true` by default) |
+| `GRIDDED_FORECASTS_ENABLED` | `backend/.env` | WeatherMesh gridded layers (`true` by default) |
+| `WB_MIN_REQUEST_INTERVAL_SEC` | `backend/.env` | Min seconds between WindBorne upstream fetches (**300**) |
+| `WEATHERMESH_MODEL` | `backend/.env` | Forecast model id (`wm-6`) |
 | `NEXT_PUBLIC_SHOW_BALLOONS` | `.env.local` | Show balloon markers on the map |
 | `ALLOWED_ORIGINS` | `backend/.env` | Comma-separated CORS origins (default localhost:3000; no `*`) |
 | `CHAT_RPM_LIMIT` | `backend/.env` | Per-IP chat cap (default **10**/min) |

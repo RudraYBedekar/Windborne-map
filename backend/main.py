@@ -16,8 +16,11 @@ from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
 from services.bedrock import BedrockChatService
+from services.cyclones import FORECAST_HOURS as CYCLONE_HOURS, TropicalCycloneService
+from services.gridded import FORECAST_HOURS as GRID_HOURS, GriddedForecastService
 from services.openweather_tiles import OPENWEATHER_TILE_MAX_ZOOM, OpenWeatherTileProxy
 from services.rate_limit import KeyedRateLimiter
+from services.wb_gate import wb_fetch_gate
 from services.windborne import WindBorneClient
 
 # Single dotenv load path (no custom parsers)
@@ -48,6 +51,8 @@ if not allowed_origins:
 http_client: Optional[httpx.AsyncClient] = None
 wb_client = WindBorneClient()
 owm_tiles = OpenWeatherTileProxy()
+cyclone_service = TropicalCycloneService()
+gridded_service = GriddedForecastService()
 chat_limiter = KeyedRateLimiter(max_per_minute=CHAT_RPM)
 weather_limiter = KeyedRateLimiter(max_per_minute=WEATHER_RPM)
 
@@ -132,6 +137,8 @@ async def lifespan(app: FastAPI):
     )
     wb_client.set_http_client(http_client)
     owm_tiles.set_http_client(http_client)
+    cyclone_service.set_http_client(http_client)
+    gridded_service.set_http_client(http_client)
     yield
     await http_client.aclose()
     http_client = None
@@ -140,6 +147,8 @@ async def lifespan(app: FastAPI):
 bedrock_service = BedrockChatService(
     weather_client=wb_client,
     telemetry_loader=_load_treasure_telemetry,
+    cyclone_service=cyclone_service,
+    gridded_service=gridded_service,
 )
 
 app = FastAPI(title="Windborne API Service", lifespan=lifespan)
@@ -204,6 +213,9 @@ def read_root():
         "cors_origins": allowed_origins,
         "chat_rpm_limit": CHAT_RPM,
         "api_key_required": bool(API_KEY),
+        "wb_min_request_interval_seconds": wb_fetch_gate.min_interval,
+        "cyclones": cyclone_service.capability(),
+        "gridded": gridded_service.capability(),
     }
 
 
@@ -271,6 +283,121 @@ async def openweather_tile(layer: str, z: int, x: int, y: int):
         )
     except Exception as e:
         raise HTTPException(status_code=502, detail="OpenWeatherMap proxy failed")
+
+
+@app.get("/api/weather/mesh-status")
+async def weather_mesh_feature_status():
+    """Capability flags for cyclone + gridded modes (5-minute upstream gate)."""
+    return {
+        "provider": "WindBorne WeatherMesh",
+        "wb_gate": wb_fetch_gate.status(),
+        "cyclones": cyclone_service.capability(),
+        "gridded": gridded_service.capability(),
+        "cyclone_forecast_hours": list(CYCLONE_HOURS),
+        "grid_forecast_hours": list(GRID_HOURS),
+    }
+
+
+@app.get("/api/cyclones")
+async def list_cyclones(
+    include_details: bool = True,
+    include_unofficial_ids: bool = False,
+    include_ensemble: bool = False,
+    basin: Optional[str] = None,
+    forecast_hour: int = 0,
+    geojson: bool = False,
+    selected_id: Optional[str] = None,
+):
+    payload = await cyclone_service.fetch_cyclones(
+        include_details=include_details,
+        include_unofficial_ids=include_unofficial_ids,
+        basin=basin,
+    )
+    if not payload.get("ok"):
+        status = 503
+        if payload.get("error") == "UNAUTHORIZED":
+            status = 403
+        elif payload.get("error") == "CYCLONES_DISABLED":
+            status = 503
+        raise HTTPException(status_code=status, detail=payload)
+    if geojson:
+        return cyclone_service.to_geojson(
+            payload,
+            forecast_hour=forecast_hour,
+            include_ensemble=include_ensemble or include_unofficial_ids,
+            selected_id=selected_id,
+        )
+    return payload
+
+
+@app.get("/api/cyclones/{cyclone_id}")
+async def get_cyclone(cyclone_id: str, forecast_hour: int = 0):
+    payload = await cyclone_service.fetch_cyclones(include_details=True)
+    if not payload.get("ok"):
+        raise HTTPException(status_code=503, detail=payload)
+    storm = cyclone_service.get_storm(payload, cyclone_id)
+    if not storm:
+        raise HTTPException(status_code=404, detail={"error": "NOT_FOUND", "cyclone_id": cyclone_id})
+    point = cyclone_service.point_at_hour(storm, forecast_hour)
+    return {
+        "ok": True,
+        "provider": payload.get("provider"),
+        "model": payload.get("model"),
+        "initialization_time": payload.get("initialization_time"),
+        "forecast_zero": payload.get("forecast_zero"),
+        "forecast_hour": forecast_hour,
+        "point": point,
+        "cyclone": storm,
+        "from_cache": payload.get("from_cache"),
+        "cone_caption": (
+            "Forecast Cone — WeatherMesh ensemble-supported range of plausible cyclone positions. "
+            "Not a guaranteed impact region."
+        ),
+    }
+
+
+@app.get("/api/weather/grid")
+async def weather_grid(
+    variable: str = "temperature_2m",
+    forecast_hour: int = 0,
+    bbox: str = "-130,20,-60,55",
+    format: str = "json",
+    resolution: int = 128,
+):
+    """Frontend-friendly WeatherMesh grid. format=json summary | format=png image overlay."""
+    if format == "png":
+        try:
+            png, meta = await gridded_service.get_png(
+                variable=variable,
+                bbox=bbox,
+                forecast_hour=forecast_hour,
+                resolution=resolution,
+            )
+            return Response(
+                content=png,
+                media_type="image/png",
+                headers={
+                    "Cache-Control": f"public, max-age={int(wb_fetch_gate.min_interval)}",
+                    "X-WM-Variable": meta.get("variable", variable),
+                    "X-WM-Forecast-Hour": str(forecast_hour),
+                    "X-WM-BBox": bbox,
+                },
+            )
+        except PermissionError as e:
+            raise HTTPException(status_code=503, detail=str(e))
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        except Exception as e:
+            raise HTTPException(
+                status_code=503,
+                detail={"error": type(e).__name__, "message": "WeatherMesh forecast layer unavailable.", "detail": str(e)},
+            )
+
+    summary = await gridded_service.get_summary(variable, bbox, forecast_hour)
+    if not summary.get("ok"):
+        code = 400 if summary.get("error") == "VALIDATION" else 503
+        raise HTTPException(status_code=code, detail=summary)
+    return summary
 
 
 @app.get("/api/weather")

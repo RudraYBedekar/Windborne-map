@@ -77,4 +77,8 @@ def get_ai_config() -> Dict[str, Any]:
         # Balloons hidden from UI — Treasure feed not operationally accurate
         "BALLOONS_ENABLED": _first_env("BALLOONS_ENABLED", default="false").lower()
         in ("true", "1", "yes"),
+        "CYCLONES_ENABLED": _first_env("CYCLONES_ENABLED", default="true").lower()
+        in ("true", "1", "yes"),
+        "GRIDDED_FORECASTS_ENABLED": _first_env("GRIDDED_FORECASTS_ENABLED", default="true").lower()
+        in ("true", "1", "yes"),
     }

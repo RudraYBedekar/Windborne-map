@@ -304,16 +304,86 @@ BEDROCK_TOOLS = [
             },
         }
     },
+    {
+        "toolSpec": {
+            "name": "list_tropical_cyclones",
+            "description": "List WeatherMesh-6 tropical cyclones for the latest initialization. Use for active storm questions. Never invent storms.",
+            "inputSchema": {"json": {"type": "object", "properties": {}, "required": []}},
+        }
+    },
+    {
+        "toolSpec": {
+            "name": "get_tropical_cyclone",
+            "description": "Get one WeatherMesh tropical cyclone by ATCF ID (e.g. CP012026).",
+            "inputSchema": {
+                "json": {
+                    "type": "object",
+                    "properties": {"cyclone_id": {"type": "string"}},
+                    "required": ["cyclone_id"],
+                    "additionalProperties": False,
+                }
+            },
+        }
+    },
+    {
+        "toolSpec": {
+            "name": "get_cyclone_forecast",
+            "description": "Get cyclone position/metrics at a forecast hour (0,12,24,48,72,120).",
+            "inputSchema": {
+                "json": {
+                    "type": "object",
+                    "properties": {
+                        "cyclone_id": {"type": "string"},
+                        "forecast_hour": {"type": "integer"},
+                    },
+                    "required": ["cyclone_id", "forecast_hour"],
+                    "additionalProperties": False,
+                }
+            },
+        }
+    },
+    {
+        "toolSpec": {
+            "name": "get_gridded_forecast_summary",
+            "description": "Deterministic WeatherMesh gridded stats (min/max/mean) for a bbox. Never invent grid values.",
+            "inputSchema": {
+                "json": {
+                    "type": "object",
+                    "properties": {
+                        "variable": {
+                            "type": "string",
+                            "description": "temperature_2m|pressure_msl|precipitation|wind_speed",
+                        },
+                        "bbox": {
+                            "type": "string",
+                            "description": "west,south,east,north",
+                        },
+                        "forecast_hour": {"type": "integer"},
+                    },
+                    "required": ["variable", "bbox"],
+                    "additionalProperties": False,
+                }
+            },
+        }
+    },
 ]
 
 
-def tools_for_config(balloons_enabled: bool = False) -> list:
-    """Exclude fleet tools when Treasure markers / fleet AI are disabled."""
-    if balloons_enabled:
-        return list(BEDROCK_TOOLS)
-    fleet_names = {"get_fleet_status", "get_balloon"}
+def tools_for_config(
+    balloons_enabled: bool = False,
+    cyclones_enabled: bool = True,
+    gridded_enabled: bool = True,
+) -> list:
+    """Filter tools by feature flags."""
+    deny = set()
+    if not balloons_enabled:
+        deny |= {"get_fleet_status", "get_balloon"}
+    if not cyclones_enabled:
+        deny |= {"list_tropical_cyclones", "get_tropical_cyclone", "get_cyclone_forecast"}
+    if not gridded_enabled:
+        deny |= {"get_gridded_forecast_summary"}
     return [
         t
         for t in BEDROCK_TOOLS
-        if t.get("toolSpec", {}).get("name") not in fleet_names
+        if t.get("toolSpec", {}).get("name") not in deny
     ]
