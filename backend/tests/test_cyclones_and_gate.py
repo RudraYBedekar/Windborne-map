@@ -175,7 +175,7 @@ def test_wb_gate_returns_stale_instead_of_sleeping():
     async def run():
         await gate.run("a", fetcher)
         t0 = time.monotonic()
-        # Different key while rate window closed → stale miss → raise quickly (no sleep)
+        # Unrelated key while rate window closed → raise quickly (no sleep)
         try:
             await gate.run("b", fetcher)
             assert False, "expected RateLimitedFetch"
@@ -190,6 +190,28 @@ def test_wb_gate_returns_stale_instead_of_sleeping():
         out, from_cache = await gate.run("b", fetcher)
         assert from_cache is True
         assert out["n"] == 2
+
+    asyncio.run(run())
+
+
+def test_wb_gate_reuses_related_family_stale():
+    gate = WindBorneFetchGate(min_interval_seconds=300)
+    calls = {"n": 0}
+
+    async def fetcher():
+        calls["n"] += 1
+        return {"bytes": b"grid", "valid_time": f"t{calls['n']}"}
+
+    async def run():
+        await gate.run("grid:wm-6:wind_speed_10m:2026-08-15T00:00:00Z", fetcher)
+        assert calls["n"] == 1
+        # Same variable family, different valid_time — must reuse previous, not raise
+        out, from_cache = await gate.run(
+            "grid:wm-6:wind_speed_10m:2026-08-16T12:00:00Z", fetcher
+        )
+        assert from_cache is True
+        assert out["valid_time"] == "t1"
+        assert calls["n"] == 1
 
     asyncio.run(run())
 

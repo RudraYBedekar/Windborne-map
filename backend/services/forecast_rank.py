@@ -380,6 +380,10 @@ class ForecastRankService:
         note_bits = [
             "Showing named cities only (ocean / remote grid points excluded).",
         ]
+        if meta.get("from_cache"):
+            note_bits.append(
+                "Using previous WeatherMesh snapshot (rate window active — not a live refetch)."
+            )
         if spec.get("limitation"):
             note_bits.insert(0, spec["limitation"])
 

@@ -121,24 +121,32 @@ class TropicalCycloneService:
         try:
             raw, from_cache = await wb_fetch_gate.run(cache_key, fetcher, force=force, ttl=cache_ttl)
         except RateLimitedFetch as e:
-            stale = wb_fetch_gate.stale_get(cache_key)
+            stale = wb_fetch_gate.stale_get_related(cache_key)
             if stale is not None:
                 return self._normalize_payload(
                     stale,
                     from_cache=True,
-                    warning=f"Serving cached cyclones; next upstream refresh in {e.retry_after:.0f}s.",
+                    warning=(
+                        f"Serving previous cyclone snapshot; next upstream refresh "
+                        f"in {e.retry_after:.0f}s."
+                    ),
                 )
             return {
                 "ok": False,
                 "error": "RATE_GATED",
-                "message": str(e),
+                "message": (
+                    "WeatherMesh cyclone feed is rate-limited and no previous snapshot "
+                    f"is cached yet. Try again in about {e.retry_after:.0f}s."
+                ),
                 "retry_after_seconds": e.retry_after,
                 "tropical_cyclones": {},
                 "total": 0,
                 "retrievedAt": _utc_now(),
             }
         except Exception as e:
-            cached = wb_fetch_gate.cache_get(cache_key) or wb_fetch_gate.stale_get(cache_key)
+            cached = wb_fetch_gate.cache_get(cache_key) or wb_fetch_gate.stale_get_related(
+                cache_key
+            )
             if cached is not None:
                 return self._normalize_payload(cached, from_cache=True, warning=str(e))
             return {

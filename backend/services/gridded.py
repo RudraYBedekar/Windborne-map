@@ -341,20 +341,22 @@ class GriddedForecastService:
         # Wind speed derived from u/v under a single gated cycle (avoid 5+5 min wait)
         if variable == "wind_speed_10m":
             valid_time = self._valid_time_for_hour(forecast_hour)
-            cache_key = f"grid:{self.model}:wind_speed_10m:{valid_time}:{west}:{south}:{east}:{north}"
+            cache_key = f"grid:{self.model}:wind_speed_10m:{valid_time}"
 
             async def fetcher_speed():
                 u_bytes = await self._download_variable_bytes("wind_u_10m", valid_time)
-                # small pause not needed — same minute budget if sequential; gate already waited once
                 v_bytes = await self._download_variable_bytes("wind_v_10m", valid_time)
                 return {"u": u_bytes, "v": v_bytes, "valid_time": valid_time}
 
             try:
                 raw, from_cache = await wb_fetch_gate.run(cache_key, fetcher_speed)
             except RateLimitedFetch as e:
-                stale = wb_fetch_gate.stale_get(cache_key)
+                stale = wb_fetch_gate.stale_get_related(cache_key)
                 if stale is None:
-                    raise RuntimeError(str(e)) from e
+                    raise RuntimeError(
+                        "WeatherMesh wind grid is rate-limited and no previous snapshot "
+                        f"is cached yet. Try again in about {e.retry_after:.0f}s."
+                    ) from e
                 raw, from_cache = stale, True
             u = self._netcdf_bytes_to_subset(raw["u"], west, south, east, north)
             v = self._netcdf_bytes_to_subset(raw["v"], west, south, east, north)
@@ -378,9 +380,12 @@ class GriddedForecastService:
         try:
             raw, from_cache = await wb_fetch_gate.run(cache_key, fetcher)
         except RateLimitedFetch as e:
-            stale = wb_fetch_gate.stale_get(cache_key)
+            stale = wb_fetch_gate.stale_get_related(cache_key)
             if stale is None:
-                raise RuntimeError(str(e)) from e
+                raise RuntimeError(
+                    "WeatherMesh grid is rate-limited and no previous snapshot "
+                    f"is cached yet. Try again in about {e.retry_after:.0f}s."
+                ) from e
             raw, from_cache = stale, True
         arr = self._netcdf_bytes_to_subset(raw["bytes"], west, south, east, north)
         meta = {
@@ -543,9 +548,12 @@ class GriddedForecastService:
             try:
                 raw, from_cache = await wb_fetch_gate.run(cache_key, fetcher)
             except RateLimitedFetch as e:
-                stale = wb_fetch_gate.stale_get(cache_key)
+                stale = wb_fetch_gate.stale_get_related(cache_key)
                 if stale is None:
-                    raise RuntimeError(str(e)) from e
+                    raise RuntimeError(
+                        "WeatherMesh grid is rate-limited and no previous snapshot "
+                        f"is cached yet. Try again in about {e.retry_after:.0f}s."
+                    ) from e
                 raw, from_cache = stale, True
             arr, lats, lons = self._netcdf_bytes_to_subset_coords(
                 raw["bytes"], west, south, east, north
